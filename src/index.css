@@ -1,0 +1,39 @@
+@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800;900&family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+
+html, body, #root { background: #0A0A0A; color: #F5F0E8; min-height: 100dvh; overflow-x: hidden; }
+html { -webkit-text-size-adjust: 100%; }
+body { font-family: 'DM Sans', system-ui, sans-serif; -webkit-font-smoothing: antialiased; overscroll-behavior-y: none; margin: 0; }
+
+input, textarea, select { background: transparent; color: inherit; font-family: inherit; }
+input:focus, textarea:focus, select:focus { outline: none; }
+button { -webkit-tap-highlight-color: transparent; font-family: inherit; cursor: pointer; }
+
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { scrollbar-width: none; }
+
+.display { font-family: 'Barlow Condensed', system-ui, sans-serif; font-weight: 800; letter-spacing: -0.01em; text-transform: uppercase; }
+.mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+
+.card { background: #141414; border: 1px solid #262626; border-radius: 14px; }
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 12px 16px; border-radius: 10px; border: 1px solid #262626; background: #1C1C1C; color: #F5F0E8; font-weight: 600; transition: transform .08s ease, background .15s ease, border-color .15s ease; }
+.btn:active { transform: scale(.98); }
+.btn-primary { background: #FF6B2B; border-color: #FF6B2B; color: #0A0A0A; }
+.btn-ghost { background: transparent; }
+.chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; border: 1px solid #262626; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+
+.input { background: #0A0A0A; border: 1px solid #262626; border-radius: 8px; padding: 10px 12px; width: 100%; color: #F5F0E8; font-size: 16px; }
+.input:focus { border-color: #FF6B2B; }
+input[type="date"].input, input[type="time"].input { font-size: 14px; }
+/* prevent iOS zoom on inputs ≥16px */
+@supports (-webkit-touch-callout: none) {
+  .input { font-size: 16px; }
+}
+
+@keyframes pulse-save { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+.saving { animation: pulse-save 1s ease infinite; }
