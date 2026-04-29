@@ -1,5 +1,6 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { useEffect, useState } from 'react'
+import { useParams, Link } from 'react-router-dom'
 import { db, type SetLog, type WorkoutSession } from '../db/schema'
 import { todayIso, fmtDate, greetingFor } from '../lib/dates'
 import { TYPE_META, PHASE_META } from '../lib/types'
@@ -14,7 +15,9 @@ import { NutritionLog } from '../components/NutritionLog'
 import { parseGpx } from '../lib/gpx'
 
 export default function Today() {
-  const date = todayIso()
+  const params = useParams<{ date?: string }>()
+  const date = params.date ?? todayIso()
+  const isAlternateDay = date !== todayIso()
   const profile = useLiveQuery(() => db.profile.get('me'))
   const planDay = useLiveQuery(() => db.planDays.where('date').equals(date).first(), [date])
   const session = useLiveQuery(async () => {
@@ -84,9 +87,12 @@ export default function Today() {
 
   return (
     <div className="px-4 pt-4 pb-8 space-y-4">
+      {isAlternateDay && (
+        <Link to="/" className="chip text-orange border-orange w-full justify-center">← Volver a HOY · entrenando {fmtDate(date)}</Link>
+      )}
       <header className="flex items-end justify-between">
         <div>
-          <div className="text-bone2 text-xs uppercase tracking-widest">{greetingFor()}, Alex</div>
+          <div className="text-bone2 text-xs uppercase tracking-widest">{isAlternateDay ? 'Sesión' : `${greetingFor()}, Alex`}</div>
           <h1 className="display text-bone text-3xl leading-tight">{fmtDate(date)}</h1>
         </div>
         <div className="text-right">

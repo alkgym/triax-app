@@ -23,6 +23,7 @@ export default function App() {
       <Routes>
         <Route element={<Layout />}>
           <Route index element={<Today />} />
+          <Route path="/entrena/:date" element={<Today />} />
           <Route path="/semana" element={<Week />} />
           <Route path="/progreso" element={<Progress />} />
           <Route path="/plan" element={<Plan />} />

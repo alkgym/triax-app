@@ -34,7 +34,7 @@ export function WorkoutPreview({ date, type, intensity, distanceKm, durationMin,
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <div className="text-[10px] uppercase tracking-widest text-bone2">Vista previa · cómo se verá al hacerlo</div>
-        <button onClick={() => navigate('/')} className="btn btn-primary text-xs px-3 py-1.5">Empezar →</button>
+        <button onClick={() => navigate(`/entrena/${date}`)} className="btn btn-primary text-xs px-3 py-1.5">Empezar →</button>
       </div>
       {isGym && <GymPreview type={type as 'push' | 'pull' | 'fullbody'} currentDate={date} />}
       {isDiscipline && (
