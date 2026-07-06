@@ -5,7 +5,7 @@ import { db, type SetLog, type WorkoutSession, type WorkoutType } from '../db/sc
 import { todayIso, fmtDate, greetingFor, addDays } from '../lib/dates'
 import { checkContraindication, suggestedPhase, REHAB_PHASE_META } from '../lib/rehab'
 import { WeekStrip } from '../components/WeekStrip'
-import { useTodayScheduledType } from '../components/ScheduleEditor'
+import { useScheduledType } from '../components/ScheduleEditor'
 import { useAutosave, vibrate } from '../db/hooks'
 import { SaveIndicator } from '../components/SaveIndicator'
 import { RestTimer } from '../components/RestTimer'
@@ -50,7 +50,7 @@ export default function Today() {
 
   const activeGymType: WorkoutType | null =
     primary && isGymType(primary.type) ? primary.type : null
-  const scheduledType = useTodayScheduledType()
+  const scheduledType = useScheduledType(date)
   const [celebrate, setCelebrate] = useState(false)
 
   async function chooseRoutine(type: WorkoutType) {
@@ -183,7 +183,7 @@ export default function Today() {
           />
         </div>
       ) : (
-        <RoutineLauncher gymTypes={(gymTypes ?? []) as WorkoutType[]} scheduledType={scheduledType} onChoose={chooseRoutine} />
+        <RoutineLauncher gymTypes={(gymTypes ?? []) as WorkoutType[]} scheduledType={scheduledType} isToday={isToday} onChoose={chooseRoutine} />
       )}
 
       {/* Cardio / otros entrenos del día */}
@@ -353,7 +353,7 @@ function PainTagger({ block, state }: { block: ExerciseBlock; state: WorkoutSess
   )
 }
 
-function RoutineLauncher({ gymTypes, scheduledType, onChoose }: { gymTypes: WorkoutType[]; scheduledType: WorkoutType | null; onChoose: (t: WorkoutType) => void }) {
+function RoutineLauncher({ gymTypes, scheduledType, isToday, onChoose }: { gymTypes: WorkoutType[]; scheduledType: WorkoutType | null; isToday: boolean; onChoose: (t: WorkoutType) => void }) {
   const schedGym = scheduledType && isGymType(scheduledType) ? scheduledType : null
   const m = schedGym ? (GYM_ROUTINE_META[schedGym] ?? { label: schedGym, color: 'var(--accent)' }) : null
   return (
@@ -363,14 +363,14 @@ function RoutineLauncher({ gymTypes, scheduledType, onChoose }: { gymTypes: Work
         <button onClick={() => onChoose(schedGym)} className="card w-full p-4 flex items-center justify-between active:opacity-70 transition-opacity relative overflow-hidden">
           <div className="absolute left-0 top-0 bottom-0 w-[3px]" style={{ background: m.color }} />
           <div className="text-left">
-            <div className="text-[11px] font-semibold uppercase" style={{ color: 'var(--text-3)', letterSpacing: '0.08em' }}>Hoy toca</div>
+            <div className="text-[11px] font-semibold uppercase" style={{ color: 'var(--text-3)', letterSpacing: '0.08em' }}>{isToday ? 'Hoy toca' : 'Ese día tocaba'}</div>
             <div className="text-[22px] font-semibold tracking-tight" style={{ color: m.color }}>{m.label}</div>
           </div>
           <span className="shrink-0 text-[13px] font-semibold px-4 py-2 rounded-lg" style={{ background: m.color, color: '#0a0a0a' }}>Empezar →</span>
         </button>
       ) : scheduledType === 'rest' ? (
         <div className="card p-4">
-          <div className="text-[13px] font-medium" style={{ color: 'var(--text)' }}>Hoy: descanso programado</div>
+          <div className="text-[13px] font-medium" style={{ color: 'var(--text)' }}>{isToday ? 'Hoy: descanso programado' : 'Ese día: descanso programado'}</div>
           <div className="text-[12px] mt-0.5" style={{ color: 'var(--text-3)' }}>Entrena libre si quieres, o haz rehab/movilidad.</div>
         </div>
       ) : null}

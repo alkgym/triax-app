@@ -114,11 +114,13 @@ export function useWorkoutSession(date: string, workoutType: WorkoutType): Worko
     delete safe.sessionId
     delete safe.id
     await db.sets.update(target.id, safe)
+    // PR automático en la transición a completada, venga de donde venga la
+    // escritura (autosave de la lista, Modo Enfoque, chip de sugerencia…).
+    if (safe.completed === true && !target.completed) await maybeRecordPR(uuid)
   }, [])
 
   const setCompleted = useCallback(async (uuid: string, completed: boolean) => {
     await updateSet(uuid, { completed })
-    if (completed) await maybeRecordPR(uuid)
   }, [updateSet])
 
   const addExtraSet = useCallback(async (templateId: number): Promise<string | null> => {

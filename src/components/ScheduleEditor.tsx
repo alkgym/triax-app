@@ -1,5 +1,6 @@
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db, type WorkoutType } from '../db/schema'
+import { todayIso } from '../lib/dates'
 import { vibrate } from '../db/hooks'
 
 const DOW = ['L', 'M', 'X', 'J', 'V', 'S', 'D']
@@ -56,10 +57,15 @@ export function ScheduleEditor() {
   )
 }
 
-/** Devuelve la rutina programada para hoy (o 'rest'). */
-export function useTodayScheduledType(): WorkoutType | null {
+/** Rutina programada para una fecha ISO concreta (o 'rest'). */
+export function useScheduledType(dateIso: string): WorkoutType | null {
   const schedule = useLiveQuery(() => db.schedule.toArray())
   if (!schedule) return null
-  const dow = (new Date().getDay() + 6) % 7 // lun=0
+  const dow = (new Date(dateIso + 'T00:00:00').getDay() + 6) % 7 // lun=0
   return schedule.find(s => s.dow === dow)?.type ?? 'rest'
+}
+
+/** Devuelve la rutina programada para hoy (o 'rest'). */
+export function useTodayScheduledType(): WorkoutType | null {
+  return useScheduledType(todayIso())
 }
