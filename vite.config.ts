@@ -8,16 +8,19 @@ export default defineConfig({
     VitePWA({
       registerType: 'autoUpdate',
       manifest: {
-        name: 'Triatlón Alex López',
-        short_name: 'TRI·AX',
-        description: 'Training tracker · Lopez in Motion',
+        name: 'Gym · Alex López',
+        short_name: 'GYM',
+        description: 'Entreno personal + readaptación lumbar · Lopez in Motion',
         theme_color: '#FF6B2B',
         background_color: '#0A0A0A',
         display: 'standalone',
         orientation: 'portrait',
         start_url: '/',
         icons: [
-          { src: 'icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' },
+          { src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+          { src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+          { src: 'icons/icon-maskable.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+          { src: 'icon.svg', sizes: 'any', type: 'image/svg+xml' },
         ],
       },
       workbox: { globPatterns: ['**/*.{js,css,html,svg,png,ico,woff2}'] },

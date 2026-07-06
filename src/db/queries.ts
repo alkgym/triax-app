@@ -32,6 +32,15 @@ export async function computeStreak(): Promise<number> {
   return streak
 }
 
+// Un peso por día: actualiza la fila existente de esa fecha en vez de duplicarla.
+export async function upsertWeight(date: string, weight: number): Promise<void> {
+  await db.transaction('rw', db.bodyMetrics, async () => {
+    const existing = await db.bodyMetrics.where('date').equals(date).first()
+    if (existing?.id != null) await db.bodyMetrics.update(existing.id, { weight })
+    else await db.bodyMetrics.add({ date, weight })
+  })
+}
+
 export async function totalCompleted(): Promise<number> {
   const sessions = await db.sessions.toArray()
   return sessions.filter(s => s.completedAt).length

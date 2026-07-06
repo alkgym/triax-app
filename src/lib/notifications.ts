@@ -24,19 +24,26 @@ export async function scheduleTodayReminder() {
   const today = todayIso()
   const plan = await db.planDays.where('date').equals(today).first()
   if (!plan) return
+
   const now = new Date()
-  const target = new Date()
+  let target = new Date()
   target.setHours(16, 45, 0, 0)
+
+  // If already past 16:45, schedule for tomorrow
+  if (target.getTime() - now.getTime() < 0) {
+    target = new Date(target.getTime() + 86400000)
+  }
+
   const ms = target.getTime() - now.getTime()
-  if (ms < 0) return // already past 16:45
   const meta = TYPE_META[plan.type]
+
   setTimeout(() => {
     try {
       new Notification(`${meta.emoji} ${meta.label} · ${plan.title}`, {
         body: MESSAGES[plan.type] ?? plan.description,
-        icon: '/icon.svg',
+        icon: '/icons/icon-192.png',   // PNG required on Android/Chrome
+        badge: '/icons/icon-192.png',
         tag: 'tri-reminder',
-        badge: '/icon.svg',
       })
     } catch {}
   }, ms)

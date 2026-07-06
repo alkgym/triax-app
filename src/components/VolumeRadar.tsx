@@ -13,7 +13,7 @@ export function VolumeRadar() {
   const data = useLiveQuery(async () => {
     const today = todayIso()
     const weekAgo = addDays(today, -7)
-    const sessions = await db.sessions.where('date').between(weekAgo, today, true, true).toArray()
+    const sessions = await db.sessions.where('date').between(weekAgo, today, true, true).filter(s => !s.isExtra).toArray()
     const sessIds = sessions.map(s => s.id!).filter(Boolean)
     if (sessIds.length === 0) return GROUPS.map(g => ({ group: LABEL[g], series: 0 }))
     const sets = await db.sets.where('sessionId').anyOf(sessIds).and(s => s.completed).toArray()

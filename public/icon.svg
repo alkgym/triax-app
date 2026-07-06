@@ -1,7 +1,26 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="96" fill="#0A0A0A"/>
-  <rect x="40" y="40" width="432" height="432" rx="64" fill="none" stroke="#FF6B2B" stroke-width="8"/>
-  <text x="256" y="240" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-weight="900" font-size="120" fill="#FF6B2B" letter-spacing="-4">TRI</text>
-  <text x="256" y="350" text-anchor="middle" font-family="system-ui,-apple-system,sans-serif" font-weight="700" font-size="64" fill="#F5F0E8">·AX</text>
-  <circle cx="256" cy="430" r="14" fill="#FF6B2B"/>
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="warm" x1="140" y1="96" x2="372" y2="416" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFB088"/>
+      <stop offset="0.45" stop-color="#FF7B3A"/>
+      <stop offset="1" stop-color="#FF5722"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="42%" r="55%">
+      <stop offset="0" stop-color="#FF5722" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#FF5722" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect x="0" y="0" width="512" height="512" rx="116" fill="#0e0e12"/>
+  <rect x="0.5" y="0.5" width="511" height="511" rx="115.5" fill="none" stroke="#ffffff" stroke-opacity="0.06"/>
+  <circle cx="256" cy="220" r="220" fill="url(#glow)"/>
+
+  <!-- columna / espina: 5 segmentos redondeados con lordosis sutil -->
+  <g fill="url(#warm)">
+    <rect x="201" y="96"  width="110" height="46" rx="23"/>
+    <rect x="190" y="167" width="150" height="46" rx="23"/>
+    <rect x="188" y="238" width="156" height="46" rx="23"/>
+    <rect x="196" y="309" width="142" height="46" rx="23"/>
+    <rect x="208" y="380" width="116" height="46" rx="23"/>
+  </g>
 </svg>
