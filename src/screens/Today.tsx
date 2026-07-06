@@ -14,6 +14,7 @@ import { FocusMode } from '../components/FocusMode'
 import { useWorkoutSession, isGymType, type WorkoutSessionState, type ExerciseBlock } from '../hooks/useWorkoutSession'
 import { upsertWeight } from '../db/queries'
 import { epley1RM, bestE1RM, parseRepTarget, suggestProgression } from '../lib/progression'
+import { MonthCalendar } from '../components/MonthCalendar'
 
 // Rutinas de gym disponibles (las que tienen plantillas seedeadas / creadas por el usuario)
 const GYM_ROUTINE_META: Record<string, { label: string; color: string }> = {
@@ -25,7 +26,10 @@ const GYM_ROUTINE_META: Record<string, { label: string; color: string }> = {
 }
 
 export default function Today() {
-  const date = todayIso()
+  const today = todayIso()
+  const [date, setDate] = useState(today)
+  const [showCal, setShowCal] = useState(false)
+  const isToday = date === today
   const profile = useLiveQuery(() => db.profile.get('me'))
   const lastWeight = useLiveQuery(async () => {
     const all = await db.bodyMetrics.orderBy('date').reverse().limit(1).toArray()
@@ -76,14 +80,39 @@ export default function Today() {
   return (
     <div className="px-4 pt-4 pb-8 space-y-4">
       <header>
-        <div className="eyebrow">{greetingFor()}, {firstName}</div>
-        <h1 className="font-semibold mt-1 tracking-tight" style={{ color: 'var(--text)', fontSize: 30, letterSpacing: '-0.035em', lineHeight: 1.08 }}>
+        <div className="flex items-center justify-between">
+          <div className="eyebrow">{isToday ? `${greetingFor()}, ${firstName}` : 'Editando otro día'}</div>
+          <div className="flex items-center gap-1">
+            <button onClick={() => { setDate(addDays(date, -1)); vibrate(10) }} className="px-2.5 py-1 text-[15px] rounded-lg"
+              style={{ color: 'var(--text-2)', border: '1px solid var(--border)' }}>‹</button>
+            <button onClick={() => { setShowCal(c => !c); vibrate(10) }} className="px-2.5 py-1 text-[13px] rounded-lg"
+              style={{ color: showCal ? 'var(--accent)' : 'var(--text-2)', border: `1px solid ${showCal ? 'var(--border-strong)' : 'var(--border)'}` }}>📅</button>
+            <button onClick={() => { setDate(addDays(date, 1)); vibrate(10) }} disabled={isToday}
+              className="px-2.5 py-1 text-[15px] rounded-lg"
+              style={{ color: 'var(--text-2)', border: '1px solid var(--border)', opacity: isToday ? 0.35 : 1 }}>›</button>
+          </div>
+        </div>
+        <h1 className="font-semibold mt-1 tracking-tight" style={{ color: isToday ? 'var(--text)' : 'var(--accent)', fontSize: 30, letterSpacing: '-0.035em', lineHeight: 1.08 }}>
           {(() => { const d = fmtDate(date); return d.charAt(0).toUpperCase() + d.slice(1) })()}
         </h1>
         <div className="flex items-center gap-3 mt-2 text-[12px]" style={{ color: 'var(--text-2)' }}>
-          <QuickWeight lastWeight={lastWeight?.weight} />
+          <QuickWeight date={date} lastWeight={lastWeight?.weight} />
+          {!isToday && (
+            <button onClick={() => setDate(today)} className="text-[12px] font-medium" style={{ color: 'var(--accent)' }}>
+              ← Volver a hoy
+            </button>
+          )}
         </div>
       </header>
+
+      {showCal && <MonthCalendar selected={date} onSelect={d => { setDate(d) }} />}
+
+      {!isToday && (
+        <div className="card p-3 text-[12px]" style={{ borderColor: 'rgba(255,107,43,.4)', background: 'rgba(255,107,43,.06)', color: 'var(--text-2)' }}>
+          Estás viendo el <b style={{ color: 'var(--accent)' }}>{fmtDate(date, { weekday: 'long', day: 'numeric', month: 'short' })}</b>.
+          Todo lo que registres o cambies aquí se guarda en esa fecha — perfecto para apuntar entrenos que se te olvidaron.
+        </div>
+      )}
 
       <WeekStrip />
 
@@ -372,7 +401,7 @@ function RoutineLauncher({ gymTypes, scheduledType, onChoose }: { gymTypes: Work
   )
 }
 
-function QuickWeight({ lastWeight }: { lastWeight?: number }) {
+function QuickWeight({ date, lastWeight }: { date: string; lastWeight?: number }) {
   const [editing, setEditing] = useState(false)
   const [val, setVal] = useState('')
   const [saving, setSaving] = useState(false)
@@ -381,7 +410,7 @@ function QuickWeight({ lastWeight }: { lastWeight?: number }) {
     const n = Number(val.replace(',', '.'))
     if (!n || saving) return
     setSaving(true)
-    await upsertWeight(todayIso(), n)
+    await upsertWeight(date, n)
     setSaving(false)
     setEditing(false)
     setVal('')
