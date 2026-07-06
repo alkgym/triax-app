@@ -9,6 +9,7 @@ import Edit from './screens/Edit'
 import { seedIfEmpty } from './db/seed'
 import { scheduleTodayReminder } from './lib/notifications'
 import { maybeAutoBackup } from './lib/autobackup'
+import { installSyncTracker, initSyncState, autoSync, isAutoSync, requestPersistentStorage } from './lib/sync'
 import { Brand } from './components/Brand'
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -37,11 +38,30 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 export default function App() {
   const [ready, setReady] = useState(false)
   useEffect(() => {
-    seedIfEmpty().then(() => {
+    seedIfEmpty().then(async () => {
       setReady(true)
       scheduleTodayReminder().catch(() => {})
       maybeAutoBackup().catch(() => {})
+      // Orden importante: decidir subir/bajar (initSyncState) ANTES de conectar
+      // el tracker, para que el sembrado de datos por defecto no cuente como
+      // cambio (si no, un dispositivo nuevo pisaría los datos buenos de otro).
+      await initSyncState()
+      installSyncTracker()
+      requestPersistentStorage().catch(() => {})
+      if (isAutoSync()) autoSync().catch(() => {})
     })
+
+    // Sincroniza al cerrar/ocultar la app y al recuperar conexión.
+    const onHide = () => { if (document.visibilityState === 'hidden' && isAutoSync()) autoSync().catch(() => {}) }
+    const onOnline = () => { if (isAutoSync()) autoSync().catch(() => {}) }
+    document.addEventListener('visibilitychange', onHide)
+    window.addEventListener('online', onOnline)
+    const timer = window.setInterval(() => { if (isAutoSync()) autoSync().catch(() => {}) }, 120_000)
+    return () => {
+      document.removeEventListener('visibilitychange', onHide)
+      window.removeEventListener('online', onOnline)
+      window.clearInterval(timer)
+    }
   }, [])
   if (!ready) return (
     <div className="min-h-screen flex flex-col items-center justify-center gap-3">

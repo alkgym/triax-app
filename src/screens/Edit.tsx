@@ -8,6 +8,7 @@ import { GearPanel } from '../components/GearPanel'
 import { reinstallTemplates, hasCanonicalRoutine } from '../db/plans/pplt'
 import { ScreenHeader } from '../components/ScreenHeader'
 import { downloadBackup, restoreBackup } from '../lib/backup'
+import { pushNow, pullNow, serverInfo, isAutoSync, setAutoSync, lastResult, listVersions, restoreVersion, type SyncResult, type ServerInfo, type VersionInfo } from '../lib/sync'
 
 const GYM_TYPES: WorkoutType[] = ['push', 'pull', 'legs', 'torso', 'fullbody']
 
@@ -290,6 +291,8 @@ function DataPanel() {
 
   return (
     <div className="space-y-3">
+      <SyncCard />
+
       <div className="card p-4 space-y-2">
         <div className="text-[12px]" style={{ color: 'var(--text-3)' }}>Notificaciones</div>
         <button
@@ -338,6 +341,145 @@ function DataPanel() {
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+function fmtAgo(ts?: number | null): string {
+  if (!ts) return 'nunca'
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000))
+  if (s < 60) return 'hace ' + s + 's'
+  const m = Math.round(s / 60)
+  if (m < 60) return 'hace ' + m + ' min'
+  const h = Math.round(m / 60)
+  if (h < 24) return 'hace ' + h + ' h'
+  return 'hace ' + Math.round(h / 24) + ' d'
+}
+
+function SyncCard() {
+  const [info, setInfo] = useState<ServerInfo | null>(null)
+  const [busy, setBusy] = useState<'' | 'push' | 'pull'>('')
+  const [auto, setAuto] = useState(isAutoSync())
+  const [result, setResult] = useState<SyncResult | null>(lastResult())
+  const [confirmPull, setConfirmPull] = useState(false)
+  const [versions, setVersions] = useState<VersionInfo[] | null>(null)
+  const [showVer, setShowVer] = useState(false)
+  const [confirmRestore, setConfirmRestore] = useState<number | null>(null)
+
+  async function refresh() { setInfo(await serverInfo()) }
+  useEffect(() => { refresh() }, [])
+
+  async function toggleVersions() {
+    const next = !showVer
+    setShowVer(next)
+    if (next) setVersions(await listVersions())
+  }
+  async function doRestore(serverAt: number) {
+    setBusy('pull'); setConfirmRestore(null)
+    const r = await restoreVersion(serverAt)
+    setResult(r); await refresh(); setBusy('')
+  }
+
+  async function doPush() {
+    setBusy('push')
+    const r = await pushNow(true)
+    setResult(r); await refresh(); setBusy('')
+  }
+  async function doPull() {
+    setBusy('pull'); setConfirmPull(false)
+    const r = await pullNow()
+    setResult(r); await refresh(); setBusy('')
+  }
+  function toggleAuto() { const v = !auto; setAuto(v); setAutoSync(v) }
+
+  const dot = info?.reachable ? 'var(--green)' : 'var(--red)'
+  const statusText = info == null
+    ? 'Comprobando…'
+    : !info.reachable
+      ? 'VPS no accesible'
+      : info.updatedAt
+        ? 'En la VPS · ' + fmtAgo(info.updatedAt)
+        : 'VPS conectada · sin datos aún'
+
+  return (
+    <div className="card p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="text-[12px]" style={{ color: 'var(--text-3)' }}>Sincronización con la VPS</div>
+        <div className="flex items-center gap-1.5">
+          <span style={{ width: 7, height: 7, borderRadius: '50%', background: dot, display: 'inline-block' }} />
+          <span className="text-[11px]" style={{ color: 'var(--text-3)' }}>{statusText}</span>
+        </div>
+      </div>
+
+      <p className="text-[11.5px] leading-relaxed" style={{ color: 'var(--text-3)' }}>
+        Cada cambio que guardas se sube solo a la VPS al momento. «Subir» fuerza el envío de este dispositivo; «Bajar» trae lo del servidor a este dispositivo.
+      </p>
+
+      <div className="grid grid-cols-2 gap-2">
+        <button className="btn btn-primary w-full" onClick={doPush} disabled={busy !== ''}>
+          {busy === 'push' ? 'Subiendo…' : 'Subir a la VPS'}
+        </button>
+        {!confirmPull ? (
+          <button className="btn w-full" onClick={() => setConfirmPull(true)} disabled={busy !== ''}>
+            {busy === 'pull' ? 'Bajando…' : 'Bajar de la VPS'}
+          </button>
+        ) : (
+          <button className="btn w-full" style={{ borderColor: 'var(--accent)', color: 'var(--accent)' }} onClick={doPull}>
+            ¿Reemplazar este dispositivo?
+          </button>
+        )}
+      </div>
+
+      <label className="flex items-center justify-between pt-1">
+        <span className="text-[12px]" style={{ color: 'var(--text-2)' }}>Sincronización automática</span>
+        <input type="checkbox" checked={auto} onChange={toggleAuto} style={{ width: 18, height: 18, accentColor: 'var(--accent)' }} />
+      </label>
+
+      <button className="btn btn-ghost w-full text-[12px]" onClick={toggleVersions}>
+        {showVer ? 'Ocultar versiones' : 'Versiones guardadas en la VPS'}
+      </button>
+      {showVer && (
+        <div className="space-y-1.5">
+          {versions == null ? (
+            <div className="text-[11.5px]" style={{ color: 'var(--text-3)' }}>Cargando…</div>
+          ) : versions.length === 0 ? (
+            <div className="text-[11.5px]" style={{ color: 'var(--text-3)' }}>Aún no hay versiones en la VPS.</div>
+          ) : versions.map((v, i) => (
+            <div key={v.serverAt} className="flex items-center justify-between gap-2 p-2 rounded"
+              style={{ background: 'var(--surface-2)' }}>
+              <div className="min-w-0">
+                <div className="text-[12px]" style={{ color: 'var(--text-2)' }}>
+                  {i === 0 ? 'Actual · ' : ''}{new Date(v.serverAt).toLocaleString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                </div>
+                <div className="text-[10.5px] num" style={{ color: 'var(--text-3)' }}>
+                  {v.sizeKb} KB{v.userRecords != null ? ' · ' + v.userRecords + ' registros' : ''}
+                </div>
+              </div>
+              {confirmRestore === v.serverAt ? (
+                <div className="flex gap-1 shrink-0">
+                  <button className="btn text-[11px] px-2 py-1" style={{ borderColor: 'var(--accent)', color: 'var(--accent)' }} onClick={() => doRestore(v.serverAt)}>Confirmar</button>
+                  <button className="btn btn-ghost text-[11px] px-2 py-1" onClick={() => setConfirmRestore(null)}>No</button>
+                </div>
+              ) : (
+                <button className="btn text-[11px] px-2 py-1 shrink-0" disabled={busy !== '' || i === 0}
+                  onClick={() => setConfirmRestore(v.serverAt)}>
+                  {i === 0 ? 'En uso' : 'Restaurar'}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {result && (
+        <div className="text-[12px] p-2 rounded"
+          style={{
+            color: result.ok ? 'var(--green)' : 'var(--red)',
+            background: 'var(--surface-2)',
+          }}>
+          {(result.ok ? '✓ ' : '✕ ') + result.message + ' · ' + fmtAgo(result.at)}
+        </div>
+      )}
     </div>
   )
 }

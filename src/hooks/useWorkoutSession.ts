@@ -12,6 +12,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { useCallback, useEffect, useMemo } from 'react'
 import { db, type ExerciseTemplate, type SetLog, type WorkoutSession, type WorkoutType } from '../db/schema'
 import { newUuid } from '../lib/uuid'
+import { maybeRecordPR } from '../lib/prs'
 
 export interface ExerciseBlock {
   templateId: number
@@ -116,7 +117,8 @@ export function useWorkoutSession(date: string, workoutType: WorkoutType): Worko
   }, [])
 
   const setCompleted = useCallback(async (uuid: string, completed: boolean) => {
-    return updateSet(uuid, { completed })
+    await updateSet(uuid, { completed })
+    if (completed) await maybeRecordPR(uuid)
   }, [updateSet])
 
   const addExtraSet = useCallback(async (templateId: number): Promise<string | null> => {

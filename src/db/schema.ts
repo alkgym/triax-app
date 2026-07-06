@@ -394,3 +394,32 @@ export class TriDB extends Dexie {
 }
 
 export const db = new TriDB()
+
+// ── Rastreador de cambios para la sincronización ────────────────────────────
+// El middleware DBCore debe registrarse ANTES de abrir la BD para que envuelva
+// las mutaciones (registrarlo después de abrir no hace nada — ese fue el bug
+// que congeló el auto-sync en junio de 2026). El callback se conecta más tarde
+// (lib/sync.installSyncTracker), así el sembrado inicial no cuenta como cambio.
+let dirtyHook: (() => void) | null = null
+export function setDirtyHook(fn: (() => void) | null) { dirtyHook = fn }
+
+db.use({
+  stack: 'dbcore',
+  name: 'triax-sync-dirty',
+  create(down) {
+    return {
+      ...down,
+      table(name) {
+        const table = down.table(name)
+        return {
+          ...table,
+          mutate: async (req) => {
+            const res = await table.mutate(req)
+            dirtyHook?.()
+            return res
+          },
+        }
+      },
+    }
+  },
+})
