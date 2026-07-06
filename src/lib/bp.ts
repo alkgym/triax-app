@@ -50,10 +50,44 @@ const NUS_WRITE = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'
 const NUS_NOTIFY = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'
 const FFE0_SERVICE = '0000ffe0-0000-1000-8000-00805f9b34fb'
 const FFE1_CHAR = '0000ffe1-0000-1000-8000-00805f9b34fb'
+// FFF0: muy común en tensiómetros white-label (Transtek y similares)
+const FFF0_SERVICE = '0000fff0-0000-1000-8000-00805f9b34fb'
+const FFF1_CHAR = '0000fff1-0000-1000-8000-00805f9b34fb'
+const FFF2_CHAR = '0000fff2-0000-1000-8000-00805f9b34fb'
 const BPS_SERVICE = '00001810-0000-1000-8000-00805f9b34fb'
+const DIS_SERVICE = '0000180a-0000-1000-8000-00805f9b34fb'  // Device Information
 const LEPU_CMD_RT_DATA = 0x08
 
-const CANDIDATE_SERVICES = [VIATOM_SERVICE, BPS_SERVICE, NUS_SERVICE, FFE0_SERVICE]
+function sig16(x: number): string { return `0000${x.toString(16).padStart(4, '0')}-0000-1000-8000-00805f9b34fb` }
+
+// Transtek/Lifesense (TMB-xxxx-BT, p. ej. TMB-2288-BT "BP3-C1"): servicio
+// propietario 0x7889 con handshake de vinculación (contraseña + XOR + usuario).
+// Protocolo según github.com/NecoHorne (Phulukisa BLE protocols).
+const TRANSTEK_SERVICE = '00007889-0000-1000-8000-00805f9b34fb'
+const TRANSTEK_WRITE = '00008a81-0000-1000-8000-00805f9b34fb'
+const TRANSTEK_INDICATE = '00008a91-0000-1000-8000-00805f9b34fb'
+const TRANSTEK_NOTIFY = '00008a92-0000-1000-8000-00805f9b34fb'
+const K_TRANSTEK_PW = 'triax.bp.transtek.pw.'   // + device.id → hex de 4 bytes
+
+// Lista amplia: lo que no esté aquí, Web Bluetooth ni siquiera nos deja verlo.
+const CANDIDATE_SERVICES = [
+  VIATOM_SERVICE, BPS_SERVICE, NUS_SERVICE, FFE0_SERVICE, FFF0_SERVICE, DIS_SERVICE,
+  TRANSTEK_SERVICE, 'battery_service',
+  sig16(0x1808), sig16(0x181b), sig16(0x181d), // glucosa · body composition · báscula (por si acaso)
+  sig16(0xffe5), sig16(0xffb0), sig16(0xfee0), sig16(0xfee1), sig16(0xfff5),
+]
+
+function hexBytes(u: Uint8Array, max = 16): string {
+  return Array.from(u.slice(0, max)).map(b => b.toString(16).padStart(2, '0')).join(' ')
+}
+
+// segundos desde 2010-01-01 00:00:00 (hora local), empaquetado little-endian
+function transtekTimeCmd(): Uint8Array {
+  const secs = Math.floor((Date.now() - new Date(2010, 0, 1).getTime()) / 1000)
+  return new Uint8Array([0x02, secs & 0xff, (secs >> 8) & 0xff, (secs >> 16) & 0xff, (secs >>> 24) & 0xff])
+}
+
+const TRANSTEK_USER_CMD = new Uint8Array([0x03, 0x01, 0x41, 0x6e, 0x64, 0x72, 0x6f, 0x69, 0x64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
 
 // CRC-8 (poly 0x07), tabla igual que BleCRC.java del SDK de Viatom
 const CRC8_TABLE = (() => {
@@ -247,7 +281,70 @@ export async function readBloodPressure(
           return
         }
 
-        // 2) Protocolo Lepu sobre el transporte que exponga el aparato
+        // 2) Transtek/Lifesense (TMB-xxxx-BT) — handshake propietario 0x7889
+        if (uuids.has(TRANSTEK_SERVICE)) {
+          const svc = services.find((s: any) => String(s.uuid).toLowerCase() === TRANSTEK_SERVICE)
+          const write = await svc.getCharacteristic(TRANSTEK_WRITE)
+          const send = async (bytes: Uint8Array) => {
+            if (write.properties?.writeWithoutResponse) await write.writeValueWithoutResponse(bytes)
+            else await write.writeValue(bytes)
+          }
+          const pwKey = K_TRANSTEK_PW + (device.id ?? 'default')
+          const storedPw = (localStorage.getItem(pwKey) ?? '').match(/.{2}/g)?.map(h => parseInt(h, 16))
+          let password: number[] | null = storedPw && storedPw.length === 4 ? storedPw : null
+          let bound = password != null
+
+          const onFrame = async (data: Uint8Array) => {
+            if (data.length === 0) return
+            const cmd = data[0]
+            if (cmd === 0xa0 && data.length >= 5) {
+              // contraseña del aparato → guardar y (si es la primera vez) vincular
+              password = [data[1], data[2], data[3], data[4]]
+              try { localStorage.setItem(pwKey, password.map(b => b.toString(16).padStart(2, '0')).join('')) } catch { /* quota */ }
+              if (!bound) {
+                const rnd = crypto.getRandomValues(new Uint8Array(4))
+                await send(new Uint8Array([0x21, rnd[0], rnd[1], rnd[2], rnd[3]]))
+              }
+              return
+            }
+            if (cmd === 0xa1 && data.length >= 5) {
+              if (!password) { onProgress({ phase: 'conectando', message: 'El aparato pide verificación pero no hay contraseña — reintenta para vincular.' }); return }
+              await send(new Uint8Array([0x20, password[0] ^ data[1], password[1] ^ data[2], password[2] ^ data[3], password[3] ^ data[4]]))
+              await send(transtekTimeCmd())
+              bound = true
+              onProgress({ phase: 'midiendo', message: 'Vinculado con el tensiómetro. Haz la medición (o se descargará la última).' })
+              return
+            }
+            if (cmd === 0x83) {
+              await send(TRANSTEK_USER_CMD)
+              return
+            }
+            // Trama de medición (según protocolo: sys u16le@1 · dia u16le@3 · pulso u16le@11)
+            if (data.length >= 13) {
+              const sys = u16le(data, 1), dia = u16le(data, 3), pulse = u16le(data, 11)
+              if (sys >= 60 && sys <= 260 && dia >= 30 && dia <= 200 && dia < sys) {
+                done({ sys, dia, pulse: pulse >= 25 && pulse <= 220 ? pulse : undefined, source: 'ble-checkme' })
+                return
+              }
+            }
+            // Desconocida → enséñala para poder afinar el protocolo a distancia
+            onProgress({ phase: 'midiendo', message: `Trama no reconocida: ${hexBytes(data)} — pásame esto tal cual.` })
+          }
+
+          for (const charUuid of [TRANSTEK_INDICATE, TRANSTEK_NOTIFY]) {
+            try {
+              const ch = await svc.getCharacteristic(charUuid)
+              ch.addEventListener('characteristicvaluechanged', (e: any) => {
+                void onFrame(new Uint8Array(e.target.value.buffer)).catch(() => {})
+              })
+              await ch.startNotifications()
+            } catch { /* alguna variante no expone ambas */ }
+          }
+          onProgress({ phase: 'midiendo', message: bound ? 'Conectado al tensiómetro. Haz la medición.' : 'Vinculando con el tensiómetro (primera vez)…' })
+          return
+        }
+
+        // 3) Protocolo Lepu sobre el transporte que exponga el aparato
         let writeCh: any = null
         let notifyCh: any = null
         if (uuids.has(VIATOM_SERVICE)) {
@@ -262,13 +359,18 @@ export async function readBloodPressure(
           const svc = services.find((s: any) => String(s.uuid).toLowerCase() === FFE0_SERVICE)
           notifyCh = await svc.getCharacteristic(FFE1_CHAR)
           writeCh = notifyCh
+        } else if (uuids.has(FFF0_SERVICE)) {
+          const svc = services.find((s: any) => String(s.uuid).toLowerCase() === FFF0_SERVICE)
+          notifyCh = await svc.getCharacteristic(FFF1_CHAR)
+          writeCh = await svc.getCharacteristic(FFF2_CHAR).catch(() => notifyCh)
         }
 
         if (!writeCh || !notifyCh) {
+          const info = await readDeviceInfo(services)
           const seen = services.length
             ? `Servicios visibles: ${services.map((s: any) => shortUuid(String(s.uuid))).join(', ')}`
-            : 'No se pudo descubrir ningún servicio (¿la app ViHealth sigue conectada al aparato?)'
-          throw new Error(`Este dispositivo no expone un servicio de tensión conocido. ${seen}. Pásame esto y lo añado.`)
+            : 'No se pudo descubrir ningún servicio (el aparato puede haber cortado la conexión — enciéndelo y reintenta enseguida)'
+          throw new Error(`Sin servicio de tensión conocido. ${info ? info + ' · ' : ''}${seen}. Pásame esto y lo añado.`)
         }
 
         const frames = new LepuFrameBuffer()
@@ -304,4 +406,20 @@ export async function readBloodPressure(
 function shortUuid(u: string): string {
   const m = u.match(/^0000([0-9a-f]{4})-0000-1000-8000-00805f9b34fb$/i)
   return m ? `0x${m[1]}` : u
+}
+
+// Fabricante y modelo vía Device Information (0x180A) — identifica el aparato
+// real aunque su servicio de tensión sea desconocido.
+async function readDeviceInfo(services: any[]): Promise<string> {
+  const dis = services.find((s: any) => String(s.uuid).toLowerCase() === DIS_SERVICE)
+  if (!dis) return ''
+  const read = async (name: string) => {
+    try {
+      const ch = await dis.getCharacteristic(name)
+      const v = await ch.readValue()
+      return new TextDecoder().decode(v.buffer).replace(/\0+$/, '').trim()
+    } catch { return '' }
+  }
+  const [man, model] = await Promise.all([read('manufacturer_name_string'), read('model_number_string')])
+  return [man, model].filter(Boolean).join(' ')
 }
