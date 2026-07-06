@@ -8,14 +8,10 @@ const KEY_PREVIOUS = 'triax.autobackup.previous'
 const KEY_LAST_AT = 'triax.autobackup.lastAt'
 const INTERVAL_MS = 7 * 24 * 60 * 60 * 1000   // 7 days
 
-export interface BackupSnapshot {
-  exportedAt: string
-  ts: number
-  [table: string]: unknown
-}
+export type BackupSnapshot = Record<string, unknown>
 
 async function snapshot(): Promise<BackupSnapshot> {
-  return await dumpAll() as unknown as BackupSnapshot
+  return dumpAll()
 }
 
 export async function maybeAutoBackup(): Promise<void> {
@@ -48,7 +44,7 @@ export function getLastBackupInfo(): { exportedAt?: string; ts?: number; sizeKb?
     const raw = localStorage.getItem(KEY_CURRENT)
     if (!raw) return {}
     const parsed = JSON.parse(raw) as BackupSnapshot
-    return { exportedAt: parsed.exportedAt, ts: parsed.ts, sizeKb: Math.round(raw.length / 1024) }
+    return { exportedAt: parsed.exportedAt as string | undefined, ts: parsed.ts as number | undefined, sizeKb: Math.round(raw.length / 1024) }
   } catch { return {} }
 }
 

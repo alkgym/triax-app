@@ -3,16 +3,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from '../db/schema'
 import { todayIso, addDays } from '../lib/dates'
 import { vibrate } from '../db/hooks'
-
-// Color por tipo de sesión (mismos tonos que el resto de la app)
-function typeColor(t: string): string {
-  const map: Record<string, string> = {
-    push: '#FF6B2B', pull: '#3B82F6', fullbody: '#A855F7', legs: '#10F4A0', torso: '#22D3EE',
-    run: '#FF5722', bike: '#34D399', bike_indoor: '#10B981', swim: '#22D3EE', swim_pool: '#0EA5E9',
-    futbol: '#F97316', gym_free: '#F59E0B',
-  }
-  return map[t] ?? 'var(--text-3)'
-}
+import { typeColor } from '../lib/colors'
 
 const DOW = ['L', 'M', 'X', 'J', 'V', 'S', 'D']
 const MONTHS = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre']

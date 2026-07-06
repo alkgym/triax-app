@@ -148,12 +148,13 @@ function sfloat(b: DataView, i: number): number {
 }
 
 function parseStandardBpm(v: DataView): BpReading | null {
+  if (v.byteLength < 7) return null
   const flags = v.getUint8(0)
   const sys = sfloat(v, 1), dia = sfloat(v, 3)
   if (!isFinite(sys) || !isFinite(dia) || sys <= 0 || dia <= 0) return null
   let i = 7 // flags(1) + sys(2) + dia(2) + MAP(2)
   if (flags & 0x02) i += 7 // timestamp
-  const pulse = (flags & 0x04) ? sfloat(v, i) : undefined
+  const pulse = (flags & 0x04) && v.byteLength >= i + 2 ? sfloat(v, i) : undefined
   return { sys: Math.round(sys), dia: Math.round(dia), pulse: pulse ? Math.round(pulse) : undefined, source: 'ble-estandar' }
 }
 
@@ -166,21 +167,29 @@ function parseStandardBpm(v: DataView): BpReading | null {
  */
 export async function readBloodPressure(
   onProgress: (p: BpProgress) => void,
-  timeoutMs = 180_000,
+  opts: { anyDevice?: boolean; timeoutMs?: number } = {},
 ): Promise<BpReading> {
+  const { anyDevice = false, timeoutMs = 180_000 } = opts
   if (!bluetoothAvailable()) {
     throw new Error('Este navegador no soporta Web Bluetooth. Úsalo en Chrome (Android/escritorio) o registra la lectura a mano.')
   }
   const bt = (navigator as any).bluetooth
-  const device = await bt.requestDevice({
-    filters: [
-      { services: [VIATOM_SERVICE] },        // Checkme / Viatom / Wellue
-      { services: ['blood_pressure'] },      // perfil estándar
-      { namePrefix: 'BP2' },
-      { namePrefix: 'Checkme' },
-    ],
-    optionalServices: [VIATOM_SERVICE, 'blood_pressure'],
-  }).catch(() => { throw new Error('Selección cancelada') })
+  // Muchos tensiómetros no anuncian el UUID del servicio (ni el nombre esperado)
+  // en el advertisement → si el filtrado no lo encuentra, `anyDevice` lista TODO
+  // lo cercano y el usuario elige; el servicio correcto se detecta al conectar.
+  const request = anyDevice
+    ? { acceptAllDevices: true, optionalServices: [VIATOM_SERVICE, 'blood_pressure'] }
+    : {
+        filters: [
+          { services: [VIATOM_SERVICE] },        // Checkme / Viatom / Wellue
+          { services: ['blood_pressure'] },      // perfil estándar
+          { namePrefix: 'BP2' }, { namePrefix: 'Checkme' }, { namePrefix: 'BP' },
+          { namePrefix: 'LP' }, { namePrefix: 'Viatom' }, { namePrefix: 'Wellue' },
+          { namePrefix: 'AirBP' },
+        ],
+        optionalServices: [VIATOM_SERVICE, 'blood_pressure'],
+      }
+  const device = await bt.requestDevice(request).catch(() => { throw new Error('Selección cancelada') })
 
   onProgress({ phase: 'conectando', message: `Conectando con ${device.name ?? 'el tensiómetro'}…` })
   const server = await device.gatt.connect()
@@ -200,8 +209,10 @@ export async function readBloodPressure(
         if (std) {
           const ch = await std.getCharacteristic('blood_pressure_measurement')
           ch.addEventListener('characteristicvaluechanged', (e: any) => {
-            const r = parseStandardBpm(e.target.value)
-            if (r) done(r)
+            try {
+              const r = parseStandardBpm(e.target.value)
+              if (r) done(r)
+            } catch { /* paquete malformado: se ignora y se espera el siguiente */ }
           })
           await ch.startNotifications()
           onProgress({ phase: 'midiendo', message: 'Conectado. Inicia la medición en el tensiómetro.' })

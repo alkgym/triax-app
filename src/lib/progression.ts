@@ -7,12 +7,20 @@ export function epley1RM(weight: number, reps: number): number {
   return weight * (1 + reps / 30)
 }
 
-/** Mejor e1RM de un conjunto de series (solo completadas con peso y reps). */
+/**
+ * e1RM de una serie registrada, o null si no puntúa.
+ * Criterio ÚNICO en toda la app (badge PR, histórico, gráficas y registro
+ * automático de PRs): serie completada con peso; si faltan las reps se asume 1
+ * (una serie solo-peso vale su peso — no desaparece del histórico).
+ */
+export function setE1RM(s: { reps?: number; weight?: number; completed?: boolean }): number | null {
+  if (!s.completed || s.weight == null || s.weight <= 0) return null
+  return epley1RM(s.weight, s.reps ?? 1)
+}
+
+/** Mejor e1RM de un conjunto de series (criterio setE1RM). */
 export function bestE1RM(sets: { reps?: number; weight?: number; completed?: boolean }[]): number {
-  return sets.reduce((m, s) => {
-    if (!s.completed || s.weight == null || s.reps == null) return m
-    return Math.max(m, epley1RM(s.weight, s.reps))
-  }, 0)
+  return sets.reduce((m, s) => Math.max(m, setE1RM(s) ?? 0), 0)
 }
 
 export interface RepTarget {

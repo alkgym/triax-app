@@ -7,7 +7,12 @@ import { vibrate } from '../db/hooks'
 import { bpCategory, bluetoothAvailable, readBloodPressure, type BpProgress } from '../lib/bp'
 
 export function BloodPressurePanel() {
-  const logs = useLiveQuery(() => db.bpLogs.orderBy('timestamp').toArray())
+  // Orden cronológico REAL (por fecha del registro, no por cuándo se tecleó):
+  // así una lectura antigua añadida hoy no descuadra la gráfica ni la "última".
+  const logs = useLiveQuery(async () => {
+    const all = await db.bpLogs.toArray()
+    return all.sort((a, b) => a.date === b.date ? a.timestamp - b.timestamp : a.date.localeCompare(b.date))
+  })
   const latest = logs?.[logs.length - 1]
 
   const chartData = (logs ?? []).slice(-30).map(l => ({
@@ -83,18 +88,22 @@ function BpCapture() {
     vibrate(20)
   }
 
-  async function readBle() {
+  const [failedOnce, setFailedOnce] = useState(false)
+
+  async function readBle(anyDevice = false) {
     setBusy(true); setStatus('')
     try {
-      const r = await readBloodPressure((p: BpProgress) => setStatus(p.message))
+      const r = await readBloodPressure((p: BpProgress) => setStatus(p.message), { anyDevice })
       await db.bpLogs.add({
         date: todayIso(), timestamp: Date.now(),
         sys: r.sys, dia: r.dia, pulse: r.pulse, source: r.source,
       })
       setStatus(`✓ ${r.sys}/${r.dia}${r.pulse ? ` · ${r.pulse} lpm` : ''} guardado`)
+      setFailedOnce(false)
       vibrate([40, 20, 80])
     } catch (e) {
       setStatus(`✕ ${e instanceof Error ? e.message : 'Error de conexión'}`)
+      setFailedOnce(true)
     } finally {
       setBusy(false)
       setTimeout(() => setStatus(s => s.startsWith('✓') ? '' : s), 4000)
@@ -112,9 +121,22 @@ function BpCapture() {
         <button className="btn btn-primary shrink-0" onClick={saveManual}>+</button>
       </div>
       {bluetoothAvailable() ? (
-        <button className="btn w-full" onClick={readBle} disabled={busy}>
-          {busy ? 'Conectado — mide en el aparato…' : '📡 Leer del tensiómetro (Checkme / BLE)'}
-        </button>
+        <>
+          <button className="btn w-full" onClick={() => readBle(false)} disabled={busy}>
+            {busy ? 'Conectado — mide en el aparato…' : '📡 Leer del tensiómetro (Checkme / BLE)'}
+          </button>
+          {failedOnce && !busy && (
+            <>
+              <button className="btn w-full" onClick={() => readBle(true)}>
+                🔍 ¿No aparece? Buscar TODOS los dispositivos
+              </button>
+              <div className="text-[11px]" style={{ color: 'var(--text-3)' }}>
+                Si el tensiómetro no sale en la lista: cierra del todo la app ViHealth/Checkme
+                (solo admite una conexión a la vez) y asegúrate de que la pantalla del aparato está encendida.
+              </div>
+            </>
+          )}
+        </>
       ) : (
         <div className="text-[11px]" style={{ color: 'var(--text-3)' }}>
           Lectura directa del Checkme disponible en Chrome (Android/escritorio). En iPhone, registra a mano.

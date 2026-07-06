@@ -15,7 +15,7 @@
 //    el auto-sync decía "todo sincronizado" para siempre.
 // ─────────────────────────────────────────────────────────────────────────
 import { db, setDirtyHook } from '../db/schema'
-import { BACKUP_TABLES } from './backup'
+import { dumpAll } from './backup'
 
 const API = '/api/snapshot'
 const K_MODIFIED = 'triax.sync.localModified' // ms de la última mutación local
@@ -23,10 +23,10 @@ const K_SYNCED = 'triax.sync.syncedAt'        // server.updatedAt reconciliado p
 const K_AUTO = 'triax.sync.auto'              // '1' | '0'
 const K_RESULT = 'triax.sync.lastResult'      // JSON SyncResult
 
-// Se sincroniza exactamente lo mismo que entra en un backup (bpLogs incluido).
-const TABLES = BACKUP_TABLES
-
-const PUSH_DEBOUNCE_MS = 5_000
+// 15 s: agrupa las series que vas apuntando durante el entreno en una sola
+// subida (cada push manda el snapshot completo; a 5 s generaba una versión en
+// el servidor casi por serie). El cierre/ocultado de la app también sincroniza.
+const PUSH_DEBOUNCE_MS = 15_000
 
 let applying = false   // true mientras aplicamos un snapshot bajado (no marcar dirty)
 let installed = false
@@ -78,14 +78,11 @@ export async function initSyncState() {
 }
 
 // ── snapshot ────────────────────────────────────────────────────────────────
+// Mismo volcado que los backups (lib/backup.dumpAll): una única definición de
+// "todo el estado". Las claves extra (exportedAt/ts) las ignoran servidor y
+// applySnapshot.
 async function buildSnapshot(): Promise<Record<string, unknown[]>> {
-  const out: Record<string, unknown[]> = {}
-  await db.transaction('r', db.tables, async () => {
-    for (const t of db.tables) {
-      if ((TABLES as readonly string[]).includes(t.name)) out[t.name] = await t.toArray()
-    }
-  })
-  return out
+  return await dumpAll() as Record<string, unknown[]>
 }
 
 async function applySnapshot(payload: Record<string, unknown[]>) {
@@ -130,10 +127,14 @@ async function serverPut(updatedAt: number, payload: Record<string, unknown[]>, 
 export async function pushNow(force = false): Promise<SyncResult> {
   const at = Date.now()
   try {
+    const markBefore = num(K_MODIFIED)
     const payload = await buildSnapshot()
     const res = await serverPut(at, payload, force)
     setNum(K_SYNCED, res.updatedAt)
-    setNum(K_MODIFIED, res.updatedAt)
+    // Solo damos por sincronizado el marcador si NO hubo escrituras mientras la
+    // subida estaba en vuelo; si las hubo, se conserva el marcador nuevo para
+    // que la siguiente sync las suba (evita perder ese cambio silenciosamente).
+    if (num(K_MODIFIED) === markBefore) setNum(K_MODIFIED, res.updatedAt)
     return record({ ok: true, kind: 'push', message: 'Datos subidos a la VPS', at })
   } catch (e) {
     return record({ ok: false, kind: 'error', message: 'Error al subir: ' + msg(e), at })

@@ -12,7 +12,7 @@ import { ScreenHeader } from '../components/ScreenHeader'
 import { isGymType } from '../hooks/useWorkoutSession'
 import { downloadBackup } from '../lib/backup'
 import { upsertWeight } from '../db/queries'
-import { epley1RM } from '../lib/progression'
+import { setE1RM } from '../lib/progression'
 import { BloodPressurePanel } from '../components/BloodPressurePanel'
 
 type Tab = 'resumen' | 'gym' | 'cardio' | 'peso'
@@ -256,7 +256,8 @@ function GymTab() {
     if (!sess?.date) continue
     const cur = bySession.get(sess.date) ?? { peso: 0, e1rm: 0 }
     cur.peso = Math.max(cur.peso, s.weight)
-    if (s.reps != null) cur.e1rm = Math.max(cur.e1rm, Math.round(epley1RM(s.weight, s.reps) * 10) / 10)
+    const e1 = setE1RM(s)
+    if (e1 != null) cur.e1rm = Math.max(cur.e1rm, Math.round(e1 * 10) / 10)
     bySession.set(sess.date, cur)
   }
   const data = Array.from(bySession.entries())

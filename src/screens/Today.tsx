@@ -13,16 +13,17 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { FocusMode } from '../components/FocusMode'
 import { useWorkoutSession, isGymType, type WorkoutSessionState, type ExerciseBlock } from '../hooks/useWorkoutSession'
 import { upsertWeight } from '../db/queries'
-import { epley1RM, bestE1RM, parseRepTarget, suggestProgression } from '../lib/progression'
+import { setE1RM, bestE1RM, parseRepTarget, suggestProgression } from '../lib/progression'
 import { MonthCalendar } from '../components/MonthCalendar'
+import { TYPE_COLORS } from '../lib/colors'
 
 // Rutinas de gym disponibles (las que tienen plantillas seedeadas / creadas por el usuario)
 const GYM_ROUTINE_META: Record<string, { label: string; color: string }> = {
-  push:     { label: 'Push',      color: '#FF6B2B' },
-  pull:     { label: 'Pull',      color: '#3B82F6' },
-  fullbody: { label: 'Full Body', color: '#A855F7' },
-  legs:     { label: 'Legs',      color: '#10F4A0' },
-  torso:    { label: 'Torso',     color: '#22D3EE' },
+  push:     { label: 'Push',      color: TYPE_COLORS.push },
+  pull:     { label: 'Pull',      color: TYPE_COLORS.pull },
+  fullbody: { label: 'Full Body', color: TYPE_COLORS.fullbody },
+  legs:     { label: 'Legs',      color: TYPE_COLORS.legs },
+  torso:    { label: 'Torso',     color: TYPE_COLORS.torso },
 }
 
 export default function Today() {
@@ -460,12 +461,7 @@ function GymBlock({ date, workoutType }: { date: string; workoutType: 'push' | '
     )
   }
 
-  const typeColor =
-    workoutType === 'push'  ? '#FF6B2B'
-  : workoutType === 'pull'  ? '#3B82F6'
-  : workoutType === 'legs'  ? '#10F4A0'
-  : workoutType === 'torso' ? '#22D3EE'
-  : '#A855F7'
+  const typeColor = TYPE_COLORS[workoutType] ?? TYPE_COLORS.fullbody
 
   return (
     <div className="space-y-4">
@@ -547,15 +543,15 @@ function ExerciseCard({ index, block, state, currentDate, accentColor }: {
     const earlierIds = new Set(earlier.map(s => s.id))
     // Mejor e1RM histórico (Epley): premia también las mejoras por reps, no solo por kg
     const best = pastSets
-      .filter(s => earlierIds.has(s.sessionId) && s.completed && s.weight != null && s.reps != null)
-      .reduce((m, s) => Math.max(m, epley1RM(s.weight!, s.reps!)), 0)
+      .filter(s => earlierIds.has(s.sessionId))
+      .reduce((m, s) => Math.max(m, setE1RM(s) ?? 0), 0)
     const last = earlier[0]
     const lastSets = pastSets.filter(s => s.sessionId === last.id).sort((a, b) => a.setNumber - b.setNumber)
     // Histórico: mejor e1RM por sesión (ascendente, últimas 10)
     const maxBySession = new Map<number, number>()
     for (const s of pastSets) {
-      if (s.completed && s.weight != null && s.reps != null && earlierIds.has(s.sessionId)) {
-        const e1 = epley1RM(s.weight, s.reps)
+      const e1 = earlierIds.has(s.sessionId) ? setE1RM(s) : null
+      if (e1 != null) {
         maxBySession.set(s.sessionId, Math.max(maxBySession.get(s.sessionId) ?? 0, e1))
       }
     }
