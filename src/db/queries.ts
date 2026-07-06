@@ -32,6 +32,20 @@ export async function computeStreak(): Promise<number> {
   return streak
 }
 
+// Lanza (o cambia a) una rutina de gym para una fecha. Única definición para
+// Hoy y Rutinas. Si la sesión existía solo como contenedor (rest/notas), el
+// crono del entreno arranca ahora, no cuando se creó la sesión.
+export async function startRoutine(date: string, type: import('./schema').WorkoutType): Promise<void> {
+  const s = await db.sessions.where('date').equals(date).filter(x => !x.isExtra).first()
+  if (!s) {
+    await db.sessions.add({ date, type, startedAt: Date.now(), notes: '', isExtra: false })
+  } else if (s.type !== type) {
+    const patch: Partial<import('./schema').WorkoutSession> = { type }
+    if (s.type === 'rest' && !s.completedAt) patch.startedAt = Date.now()
+    await db.sessions.update(s.id!, patch)
+  }
+}
+
 // Un peso por día: actualiza la fila existente de esa fecha en vez de duplicarla.
 export async function upsertWeight(date: string, weight: number): Promise<void> {
   await db.transaction('rw', db.bodyMetrics, async () => {

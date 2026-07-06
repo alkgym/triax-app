@@ -14,7 +14,7 @@ import { startRest, stopRest } from '../lib/restTimer'
 import { motion, AnimatePresence } from 'framer-motion'
 import { FocusMode } from '../components/FocusMode'
 import { useWorkoutSession, isGymType, type WorkoutSessionState, type ExerciseBlock } from '../hooks/useWorkoutSession'
-import { upsertWeight } from '../db/queries'
+import { upsertWeight, startRoutine } from '../db/queries'
 import { setE1RM, bestE1RM, parseRepTarget, suggestProgression } from '../lib/progression'
 import { MonthCalendar } from '../components/MonthCalendar'
 import { TYPE_COLORS } from '../lib/colors'
@@ -55,16 +55,7 @@ export default function Today() {
   const scheduledType = useScheduledType(date)
 
   async function chooseRoutine(type: WorkoutType) {
-    const s = await db.sessions.where('date').equals(date).filter(x => !x.isExtra).first()
-    if (!s) {
-      await db.sessions.add({ date, type, startedAt: Date.now(), notes: '', isExtra: false })
-    } else if (s.type !== type) {
-      // Si la sesión existía solo como contenedor (rest/notas), el crono del
-      // entreno arranca ahora, no cuando se creó la sesión por la mañana.
-      const patch: Partial<WorkoutSession> = { type }
-      if (s.type === 'rest' && !s.completedAt) patch.startedAt = Date.now()
-      await db.sessions.update(s.id!, patch)
-    }
+    await startRoutine(date, type)
     vibrate(20)
   }
 

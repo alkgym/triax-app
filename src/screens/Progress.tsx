@@ -9,11 +9,11 @@ import { Achievements } from '../components/Achievements'
 import { WeeklySummary } from '../components/WeeklySummary'
 import { WeightPainChart } from '../components/WeightPainChart'
 import { ScreenHeader } from '../components/ScreenHeader'
-import { isGymType } from '../hooks/useWorkoutSession'
 import { downloadBackup } from '../lib/backup'
 import { upsertWeight } from '../db/queries'
 import { setE1RM } from '../lib/progression'
 import { BloodPressurePanel } from '../components/BloodPressurePanel'
+import { WeeklyVolume } from '../components/WeeklyVolume'
 
 type Tab = 'resumen' | 'gym' | 'cardio' | 'peso'
 
@@ -55,6 +55,7 @@ function painColor(l: number): string {
 function ResumenTab() {
   const today = todayIso()
   const sessions = useLiveQuery(() => db.sessions.toArray())
+  const allSets = useLiveQuery(() => db.sets.toArray())
   const pains = useLiveQuery(() => db.painLogs.orderBy('date').toArray())
   const lastWeight = useLiveQuery(async () => (await db.bodyMetrics.orderBy('date').reverse().limit(1).toArray())[0])
 
@@ -76,7 +77,14 @@ function ResumenTab() {
   const weekDays = Array.from({ length: 7 }, (_, i) => { const d = new Date(monday); d.setDate(d.getDate() + i); return d.toISOString().slice(0, 10) })
   const weekDone = sessions.filter(s => isDone(s) && weekDays.includes(s.date)).length
 
-  const gymSess = sessions.filter(s => isGymType(s.type) && isDone(s)).length
+  // Volumen de esta semana (Σ peso×reps de series completadas)
+  const dateOfSession = new Map<number, string>(sessions.map(s => [s.id!, s.date]))
+  const weekVolume = (allSets ?? []).reduce((a, st) => {
+    if (!st.completed || st.weight == null || st.reps == null) return a
+    const d = dateOfSession.get(st.sessionId)
+    return d && weekDays.includes(d) ? a + st.weight * st.reps : a
+  }, 0)
+  const weekVolLabel = weekVolume >= 1000 ? `${(weekVolume / 1000).toFixed(2)} t` : `${Math.round(weekVolume)} kg`
   const cardio = sessions.filter(s => isDone(s) && ['run', 'bike', 'bike_indoor', 'swim', 'swim_pool'].includes(s.type))
   const swimKm = cardio.filter(s => s.type === 'swim' || s.type === 'swim_pool').reduce((a, s) => a + (s.distanceKm ?? 0), 0)
   const bikeKm = cardio.filter(s => s.type === 'bike' || s.type === 'bike_indoor').reduce((a, s) => a + (s.distanceKm ?? 0), 0)
@@ -102,9 +110,11 @@ function ResumenTab() {
       <div className="grid grid-cols-2 gap-2">
         <StatCard label="Racha" value={String(streak)} unit="días seguidos" color="#F59E0B" />
         <StatCard label="Esta semana" value={String(weekDone)} unit="entrenos" color="#FF5722" />
-        <StatCard label="Gym total" value={String(gymSess)} unit="sesiones" color="#A78BFA" />
+        <StatCard label="Volumen" value={weekVolLabel} unit="esta semana" color="#A78BFA" />
         <StatCard label="Dolor (7d)" value={avg7 != null ? avg7.toFixed(1) : '—'} unit={lastPain ? `último ${lastPain.level}/10` : 'sin registros'} color={avg7 != null ? painColor(avg7) : '#525252'} />
       </div>
+
+      <WeeklyVolume />
 
       <WeeklySummary />
 
