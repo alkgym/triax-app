@@ -8,7 +8,9 @@ import { WeekStrip } from '../components/WeekStrip'
 import { useScheduledType } from '../components/ScheduleEditor'
 import { useAutosave, vibrate } from '../db/hooks'
 import { SaveIndicator } from '../components/SaveIndicator'
-import { RestTimer } from '../components/RestTimer'
+import { FloatingRestTimer } from '../components/FloatingRestTimer'
+import { SessionSummary, type SessionStats } from '../components/SessionSummary'
+import { startRest, stopRest } from '../lib/restTimer'
 import { motion, AnimatePresence } from 'framer-motion'
 import { FocusMode } from '../components/FocusMode'
 import { useWorkoutSession, isGymType, type WorkoutSessionState, type ExerciseBlock } from '../hooks/useWorkoutSession'
@@ -51,14 +53,17 @@ export default function Today() {
   const activeGymType: WorkoutType | null =
     primary && isGymType(primary.type) ? primary.type : null
   const scheduledType = useScheduledType(date)
-  const [celebrate, setCelebrate] = useState(false)
 
   async function chooseRoutine(type: WorkoutType) {
     const s = await db.sessions.where('date').equals(date).filter(x => !x.isExtra).first()
     if (!s) {
       await db.sessions.add({ date, type, startedAt: Date.now(), notes: '', isExtra: false })
     } else if (s.type !== type) {
-      await db.sessions.update(s.id!, { type })
+      // Si la sesión existía solo como contenedor (rest/notas), el crono del
+      // entreno arranca ahora, no cuando se creó la sesión por la mañana.
+      const patch: Partial<WorkoutSession> = { type }
+      if (s.type === 'rest' && !s.completedAt) patch.startedAt = Date.now()
+      await db.sessions.update(s.id!, patch)
     }
     vibrate(20)
   }
@@ -156,32 +161,7 @@ export default function Today() {
 
       {/* Rutina de gym activa o lanzador */}
       {activeGymType ? (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between px-1">
-            <span className="text-[11px] font-semibold uppercase" style={{ color: GYM_ROUTINE_META[activeGymType]?.color ?? 'var(--accent)', letterSpacing: '0.08em' }}>
-              {GYM_ROUTINE_META[activeGymType]?.label ?? activeGymType}
-            </span>
-            <button onClick={cancelRoutine} className="text-[12px]" style={{ color: 'var(--text-3)' }}>Cambiar rutina</button>
-          </div>
-          <GymBlock date={date} workoutType={activeGymType as any} />
-          <CompleteButton
-            done={!!primary?.completedAt}
-            completedAt={primary?.completedAt}
-            onComplete={async () => {
-              const s = await db.sessions.where('date').equals(date).filter(x => !x.isExtra).first()
-              if (s?.id) {
-                await db.sessions.update(s.id, { completedAt: Date.now() })
-                vibrate([60, 30, 60, 30, 120])
-                setCelebrate(true)
-                setTimeout(() => setCelebrate(false), 1900)
-              }
-            }}
-            onUndo={async () => {
-              const s = await db.sessions.where('date').equals(date).filter(x => !x.isExtra).first()
-              if (s?.id) await db.sessions.update(s.id, { completedAt: undefined } as any)
-            }}
-          />
-        </div>
+        <GymBlock date={date} workoutType={activeGymType as any} onCancelRoutine={cancelRoutine} />
       ) : (
         <RoutineLauncher gymTypes={(gymTypes ?? []) as WorkoutType[]} scheduledType={scheduledType} isToday={isToday} onChoose={chooseRoutine} />
       )}
@@ -190,8 +170,6 @@ export default function Today() {
       <ExtraWorkoutsBlock date={date} />
 
       <NotesField date={date} />
-
-      <CelebrationOverlay show={celebrate} />
     </div>
   )
 }
@@ -358,15 +336,21 @@ function RoutineLauncher({ gymTypes, scheduledType, isToday, onChoose }: { gymTy
   const m = schedGym ? (GYM_ROUTINE_META[schedGym] ?? { label: schedGym, color: 'var(--accent)' }) : null
   return (
     <div className="space-y-3">
-      {/* Sugerencia del horario */}
+      {/* Sugerencia del horario — hero de arranque */}
       {schedGym && m ? (
-        <button onClick={() => onChoose(schedGym)} className="card w-full p-4 flex items-center justify-between active:opacity-70 transition-opacity relative overflow-hidden">
-          <div className="absolute left-0 top-0 bottom-0 w-[3px]" style={{ background: m.color }} />
-          <div className="text-left">
+        <button onClick={() => onChoose(schedGym)}
+          className="card w-full p-5 flex items-center justify-between active:opacity-80 transition-opacity relative overflow-hidden"
+          style={{ borderColor: `${m.color}55` }}>
+          <div className="absolute inset-0 pointer-events-none"
+            style={{ background: `radial-gradient(120% 140% at 0% 0%, ${m.color}1f, transparent 55%)` }} />
+          <div className="text-left relative">
             <div className="text-[11px] font-semibold uppercase" style={{ color: 'var(--text-3)', letterSpacing: '0.08em' }}>{isToday ? 'Hoy toca' : 'Ese día tocaba'}</div>
-            <div className="text-[22px] font-semibold tracking-tight" style={{ color: m.color }}>{m.label}</div>
+            <div className="display text-[30px] font-bold tracking-tight leading-tight" style={{ color: m.color }}>{m.label}</div>
           </div>
-          <span className="shrink-0 text-[13px] font-semibold px-4 py-2 rounded-lg" style={{ background: m.color, color: '#0a0a0a' }}>Empezar →</span>
+          <span className="shrink-0 relative text-[14px] font-bold px-5 rounded-xl flex items-center"
+            style={{ background: m.color, color: '#0a0a0a', height: 48, boxShadow: `0 6px 20px ${m.color}55` }}>
+            Empezar →
+          </span>
         </button>
       ) : scheduledType === 'rest' ? (
         <div className="card p-4">
@@ -450,8 +434,44 @@ function QuickWeight({ date, lastWeight }: { date: string; lastWeight?: number }
   )
 }
 
-function GymBlock({ date, workoutType }: { date: string; workoutType: 'push' | 'pull' | 'fullbody' | 'legs' | 'torso' }) {
+function GymBlock({ date, workoutType, onCancelRoutine }: {
+  date: string
+  workoutType: 'push' | 'pull' | 'fullbody' | 'legs' | 'torso'
+  onCancelRoutine: () => void
+}) {
   const state = useWorkoutSession(date, workoutType)
+  const [celebrate, setCelebrate] = useState(false)
+  const [summaryOpen, setSummaryOpen] = useState(false)
+  const [summaryStats, setSummaryStats] = useState<SessionStats | null>(null)
+
+  const typeColor = TYPE_COLORS[workoutType] ?? TYPE_COLORS.fullbody
+  const session = state.session
+  const sessionDone = !!session?.completedAt
+
+  async function completeWorkout() {
+    if (!session?.id) return
+    const completedAt = Date.now()
+    await db.sessions.update(session.id, { completedAt })
+    vibrate([60, 30, 60, 30, 120])
+    stopRest()
+    const doneSets = state.flatSets.filter(s => s.completed)
+    const volumeKg = doneSets.reduce((a, s) => a + (s.weight ?? 0) * (s.reps ?? 0), 0)
+    const prs = await db.prs.where('date').equals(date).toArray()
+    const rawMin = session.startedAt ? Math.round((completedAt - session.startedAt) / 60000) : null
+    const durationMin = rawMin != null && rawMin >= 1 && rawMin <= 360 ? rawMin : null
+    setSummaryStats({
+      durationMin, volumeKg,
+      setsDone: doneSets.length, setsTotal: state.flatSets.length,
+      exercises: state.blocks.length, prs,
+    })
+    setCelebrate(true)
+    setTimeout(() => { setCelebrate(false); setSummaryOpen(true) }, 1200)
+  }
+
+  async function undoComplete() {
+    if (session?.id) await db.sessions.update(session.id, { completedAt: undefined } as never)
+  }
+
   if (!state.ready) return <div className="text-[13px]" style={{ color: 'var(--text-3)' }}>Cargando ejercicios…</div>
   if (state.blocks.length === 0) {
     return (
@@ -461,12 +481,15 @@ function GymBlock({ date, workoutType }: { date: string; workoutType: 'push' | '
     )
   }
 
-  const typeColor = TYPE_COLORS[workoutType] ?? TYPE_COLORS.fullbody
-
   return (
     <div className="space-y-4">
+      <SessionHeader
+        state={state}
+        accentColor={typeColor}
+        label={GYM_ROUTINE_META[workoutType]?.label ?? workoutType}
+        onCancel={onCancelRoutine}
+      />
       <FocusModeToggle state={state} accentColor={typeColor} />
-      <RestTimer />
       {state.blocks.map((b, idx) => (
         <ExerciseCard
           key={b.blockUuid}
@@ -475,8 +498,92 @@ function GymBlock({ date, workoutType }: { date: string; workoutType: 'push' | '
           state={state}
           currentDate={date}
           accentColor={typeColor}
+          restEnabled={!sessionDone && date === todayIso()}
         />
       ))}
+      <CompleteButton done={sessionDone} completedAt={session?.completedAt} onComplete={completeWorkout} onUndo={undoComplete} />
+      <FloatingRestTimer />
+      <CelebrationOverlay show={celebrate} />
+      {summaryStats && (
+        <SessionSummary open={summaryOpen} accentColor={typeColor} stats={summaryStats} onClose={() => setSummaryOpen(false)} />
+      )}
+    </div>
+  )
+}
+
+// Cabecera de sesión fija: rutina, crono en vivo, progreso de series y volumen.
+function SessionHeader({ state, accentColor, label, onCancel }: {
+  state: WorkoutSessionState
+  accentColor: string
+  label: string
+  onCancel: () => void
+}) {
+  const session = state.session
+  const total = state.flatSets.length
+  const done = state.flatSets.filter(s => s.completed).length
+  const volumeKg = state.flatSets.reduce((a, s) => s.completed ? a + (s.weight ?? 0) * (s.reps ?? 0) : a, 0)
+  const running = !!session?.startedAt && !session?.completedAt
+
+  const [, tick] = useState(0)
+  useEffect(() => {
+    if (!running) return
+    const id = window.setInterval(() => tick(t => t + 1), 1000)
+    return () => window.clearInterval(id)
+  }, [running])
+
+  const elapsedSec = session?.startedAt
+    ? Math.max(0, Math.floor(((session.completedAt ?? Date.now()) - session.startedAt) / 1000))
+    : null
+  const showClock = elapsedSec != null && elapsedSec < 6 * 3600
+  const hh = elapsedSec != null ? Math.floor(elapsedSec / 3600) : 0
+  const mm = elapsedSec != null ? Math.floor((elapsedSec % 3600) / 60) : 0
+  const ss = elapsedSec != null ? elapsedSec % 60 : 0
+  const clock = hh > 0
+    ? `${hh}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
+    : `${mm}:${String(ss).padStart(2, '0')}`
+
+  const volLabel = volumeKg >= 1000 ? `${(volumeKg / 1000).toFixed(2)} t` : `${Math.round(volumeKg)} kg`
+  const pct = total > 0 ? (done / total) * 100 : 0
+
+  return (
+    <div className="sticky z-30 rounded-2xl px-4 py-3"
+      style={{
+        top: 8,
+        background: 'rgba(15,15,19,0.88)',
+        border: '1px solid var(--border-strong)',
+        backdropFilter: 'blur(20px) saturate(1.3)',
+        WebkitBackdropFilter: 'blur(20px) saturate(1.3)',
+        boxShadow: '0 12px 32px rgba(0,0,0,0.45), 0 1px 0 rgba(255,255,255,0.04) inset',
+      }}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: accentColor, boxShadow: `0 0 10px ${accentColor}88` }} />
+          <span className="text-[15px] font-semibold tracking-tight truncate" style={{ color: 'var(--text)' }}>{label}</span>
+          {showClock && (
+            <span className="num text-[13px] font-semibold px-2 py-0.5 rounded-lg shrink-0"
+              style={{ color: session?.completedAt ? 'var(--green)' : 'var(--text-2)', background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+              {clock}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button onClick={() => { startRest(); vibrate(10) }} className="text-[13px] w-8 h-8 rounded-lg flex items-center justify-center"
+            style={{ color: 'var(--text-2)', background: 'var(--surface-2)', border: '1px solid var(--border)' }} title="Descanso">
+            ⏱
+          </button>
+          <button onClick={onCancel} className="text-[11.5px] px-2 h-8 rounded-lg" style={{ color: 'var(--text-3)' }}>
+            Cambiar
+          </button>
+        </div>
+      </div>
+      <div className="flex items-center gap-3 mt-2.5">
+        <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--surface-2)' }}>
+          <div className="h-full rounded-full" style={{ width: `${pct}%`, background: accentColor, transition: 'width .3s ease', boxShadow: `0 0 8px ${accentColor}66` }} />
+        </div>
+        <span className="num text-[12px] shrink-0" style={{ color: 'var(--text-2)' }}>
+          <b style={{ color: 'var(--text)' }}>{done}</b>/{total} · <b style={{ color: accentColor }}>{volLabel}</b>
+        </span>
+      </div>
     </div>
   )
 }
@@ -516,12 +623,13 @@ function FocusModeToggle({ state, accentColor }: { state: WorkoutSessionState; a
   )
 }
 
-function ExerciseCard({ index, block, state, currentDate, accentColor }: {
+function ExerciseCard({ index, block, state, currentDate, accentColor, restEnabled }: {
   index: number
   block: ExerciseBlock
   state: WorkoutSessionState
   currentDate: string
   accentColor: string
+  restEnabled: boolean
 }) {
   const { name, reps, rir, pesoUnidad: unit, notas, setRows: sets, templateId } = block
   const done = sets.filter(s => s.completed).length
@@ -574,6 +682,36 @@ function ExerciseCard({ index, block, state, currentDate, accentColor }: {
       })
     : null
 
+  // Ejercicio terminado → tarjeta plegada (menos scroll durante el entreno).
+  // El usuario puede desplegarla; al completar la última serie se vuelve a plegar.
+  const [expandOverride, setExpandOverride] = useState<boolean | null>(null)
+  useEffect(() => { if (!allDone) setExpandOverride(null) }, [allDone])
+  const collapsed = allDone && expandOverride !== true
+
+  if (collapsed) {
+    const bestSet = sets.reduce<SetLog | null>((m, s) => {
+      if (!s.completed || s.weight == null) return m
+      return m == null || (s.weight > (m.weight ?? 0)) ? s : m
+    }, null)
+    return (
+      <button onClick={() => setExpandOverride(true)}
+        className="card w-full px-4 py-3 flex items-center justify-between gap-3 text-left active:opacity-80 transition-opacity"
+        style={{ borderColor: 'rgba(34,197,94,0.35)' }}>
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="shrink-0 w-6 h-6 rounded-md flex items-center justify-center text-[13px]"
+            style={{ background: 'rgba(34,197,94,0.12)', color: 'var(--green)', border: '1px solid rgba(34,197,94,0.35)' }}>
+            ✓
+          </div>
+          <span className="text-[14.5px] font-medium truncate" style={{ color: 'var(--text)' }}>{name}</span>
+          {isPr && <span className="text-[12px] shrink-0">🏆</span>}
+        </div>
+        <span className="num text-[12px] shrink-0" style={{ color: 'var(--text-3)' }}>
+          {bestSet ? `${bestSet.weight}×${bestSet.reps ?? '–'} · ` : ''}{sets.length} series <span style={{ fontSize: 10 }}>▾</span>
+        </span>
+      </button>
+    )
+  }
+
   return (
     <div
       className="card overflow-hidden"
@@ -603,10 +741,13 @@ function ExerciseCard({ index, block, state, currentDate, accentColor }: {
           </div>
         </div>
 
-        <div className="shrink-0 text-right">
+        <div className="shrink-0 text-right flex items-center gap-2">
           <span className="num text-[18px] font-semibold" style={{ color: allDone ? 'var(--green)' : 'var(--text)' }}>
             {done}<span className="text-[12px] font-normal" style={{ color: 'var(--text-3)' }}>/{sets.length}</span>
           </span>
+          {allDone && (
+            <button onClick={() => setExpandOverride(false)} className="text-[12px] px-1.5 py-1" style={{ color: 'var(--text-3)' }}>▴</button>
+          )}
         </div>
       </div>
 
@@ -655,13 +796,19 @@ function ExerciseCard({ index, block, state, currentDate, accentColor }: {
         <SuggestionChip suggestion={suggestion} sets={sets} state={state} accentColor={accentColor} />
       )}
 
-      <div className="mx-4 h-px mb-3" style={{ background: 'var(--border)' }} />
+      <div className="mx-4 h-px mb-2" style={{ background: 'var(--border)' }} />
 
-      {/* Sets */}
-      <div className="px-4 space-y-2">
+      {/* Sets — columnas al estilo app de fitness */}
+      <div className="px-4 grid grid-cols-[24px_minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1fr)_38px_20px] items-center gap-1.5 mb-1.5">
+        {['#', 'Anterior', 'Kg', 'Reps', '', ''].map((h, i) => (
+          <span key={i} className="text-[9.5px] font-semibold uppercase text-center"
+            style={{ color: 'var(--text-3)', letterSpacing: '0.07em' }}>{h}</span>
+        ))}
+      </div>
+      <div className="px-4 space-y-1.5">
         {sets.map(s => {
           const prev = previous?.sets.find(p => p.setNumber === s.setNumber)
-          return <SetRow key={s.uuid ?? s.id} set={s} prev={prev} state={state} accentColor={accentColor} canDelete={sets.length > 1} />
+          return <SetRow key={s.uuid ?? s.id} set={s} prev={prev} state={state} canDelete={sets.length > 1} restEnabled={restEnabled} />
         })}
       </div>
 
@@ -725,8 +872,8 @@ function SuggestionChip({ suggestion, sets, state, accentColor }: {
   )
 }
 
-function SetRow({ set, prev, state, accentColor, canDelete }: {
-  set: SetLog; prev?: SetLog; state: WorkoutSessionState; accentColor: string; canDelete: boolean
+function SetRow({ set, prev, state, canDelete, restEnabled }: {
+  set: SetLog; prev?: SetLog; state: WorkoutSessionState; canDelete: boolean; restEnabled: boolean
 }) {
   const uuid = set.uuid!  // post-migration always present
   const [reps, setReps] = useState<string>(set.reps != null ? String(set.reps) : '')
@@ -734,6 +881,13 @@ function SetRow({ set, prev, state, accentColor, canDelete }: {
   const [completed, setCompleted] = useState(set.completed)
   const [confirmDel, setConfirmDel] = useState(false)
   const lastExternalRef = useRef({ reps: set.reps, weight: set.weight, completed: set.completed })
+
+  // confirmación de borrado con auto-reset
+  useEffect(() => {
+    if (!confirmDel) return
+    const id = window.setTimeout(() => setConfirmDel(false), 2500)
+    return () => window.clearTimeout(id)
+  }, [confirmDel])
 
   // ── External sync (FocusMode etc.) ─────────────────────────────────
   useEffect(() => {
@@ -769,92 +923,101 @@ function SetRow({ set, prev, state, accentColor, canDelete }: {
     vibrate(15)
   }
 
+  function toggleCompleted() {
+    const next = !completed
+    // Autorrelleno al completar: si los campos están vacíos, la serie hecha
+    // toma los valores de la última sesión (los del placeholder) — un toque.
+    if (next) {
+      if (weight === '' && prev?.weight != null) setWeight(String(prev.weight))
+      if (reps === '' && prev?.reps != null) setReps(String(prev.reps))
+      if (restEnabled) startRest()
+      vibrate(20)
+    } else {
+      vibrate(10)
+    }
+    setCompleted(next)
+  }
+
   async function del() {
     await state.deleteSet(uuid)
     vibrate(30)
   }
 
+  const inputStyle = { color: 'var(--text)' } as const
+
   return (
     <div
-      className="rounded-lg px-3 py-2 flex items-center gap-2.5"
+      className="relative rounded-xl px-2 py-1.5 grid grid-cols-[24px_minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1fr)_38px_20px] items-center gap-1.5"
       style={{
-        background: completed ? 'rgba(34,197,94,0.06)' : 'var(--surface-2)',
-        border: `1px solid ${completed ? 'rgba(34,197,94,0.25)' : 'var(--border)'}`,
+        background: completed ? 'rgba(34,197,94,0.07)' : 'var(--surface-2)',
+        border: `1px solid ${completed ? 'rgba(34,197,94,0.28)' : 'var(--border)'}`,
+        transition: 'background .2s ease, border-color .2s ease',
       }}
     >
-      {/* Set number */}
-      <div className="shrink-0 w-5 text-center">
-        <span className="num text-[13px] font-medium" style={{ color: completed ? 'var(--green)' : 'var(--text-3)' }}>
-          {set.setNumber}
-        </span>
-      </div>
+      {/* nº serie */}
+      <span className="num text-[13px] font-semibold text-center" style={{ color: completed ? 'var(--green)' : 'var(--text-3)' }}>
+        {set.setNumber}
+      </span>
 
-      {/* Reps input */}
-      <div className="flex-1 min-w-0">
-        <input
-          className="num w-full bg-transparent text-center font-medium text-[15px] focus:outline-none"
-          style={{ color: 'var(--text)' }}
-          inputMode="decimal"
-          placeholder={prev?.reps != null ? String(prev.reps) : '—'}
-          value={reps}
-          onChange={e => setReps(e.target.value)}
-        />
-      </div>
-
-      <span className="text-[12px] shrink-0" style={{ color: 'var(--text-3)' }}>×</span>
-
-      {/* Weight input */}
-      <div className="flex-1 min-w-0">
-        <input
-          className="num w-full bg-transparent text-center font-medium text-[15px] focus:outline-none"
-          style={{ color: 'var(--text)' }}
-          inputMode="decimal"
-          placeholder={prev?.weight != null ? String(prev.weight) : '—'}
-          value={weight}
-          onChange={e => setWeight(e.target.value)}
-        />
-      </div>
-
-      {/* Prev hint */}
-      {prev && !completed && (
-        <button
-          onClick={fillFromPrev}
-          className="shrink-0 num text-[11px] px-2 py-0.5 rounded transition-colors"
-          style={{ color: accentColor, border: '1px solid var(--border)' }}
-        >
+      {/* Anterior — toca para rellenar */}
+      {prev && (prev.weight != null || prev.reps != null) ? (
+        <button onClick={fillFromPrev} disabled={completed}
+          className="num text-[12px] py-1.5 rounded-lg text-center min-w-0 truncate transition-colors"
+          style={{ color: completed ? 'var(--text-3)' : 'var(--text-2)', background: completed ? 'transparent' : 'var(--surface-1)', border: `1px solid ${completed ? 'transparent' : 'var(--border)'}` }}>
           {prev.weight ?? '–'}×{prev.reps ?? '–'}
         </button>
+      ) : (
+        <span className="text-[12px] text-center" style={{ color: 'var(--text-3)' }}>—</span>
       )}
 
-      {/* Complete toggle */}
+      {/* KG */}
+      <input
+        className="num w-full bg-transparent text-center font-semibold text-[16px] py-1 focus:outline-none rounded-lg"
+        style={inputStyle}
+        inputMode="decimal"
+        placeholder={prev?.weight != null ? String(prev.weight) : '—'}
+        value={weight}
+        onChange={e => setWeight(e.target.value)}
+      />
+
+      {/* REPS */}
+      <input
+        className="num w-full bg-transparent text-center font-semibold text-[16px] py-1 focus:outline-none rounded-lg"
+        style={inputStyle}
+        inputMode="decimal"
+        placeholder={prev?.reps != null ? String(prev.reps) : '—'}
+        value={reps}
+        onChange={e => setReps(e.target.value)}
+      />
+
+      {/* Completar (arranca descanso) */}
       <button
-        onClick={() => { setCompleted(c => !c); vibrate(20) }}
-        className="shrink-0 w-8 h-8 rounded-md flex items-center justify-center transition-colors"
+        onClick={toggleCompleted}
+        className="w-[38px] h-9 rounded-lg flex items-center justify-center transition-all active:scale-90"
         style={completed
-          ? { background: 'rgba(34,197,94,0.15)', border: '1px solid rgba(34,197,94,0.4)' }
+          ? { background: 'var(--green)', border: '1px solid var(--green)' }
           : { background: 'transparent', border: '1px solid var(--border-strong)' }
         }
       >
-        <span style={{ color: completed ? 'var(--green)' : 'var(--text-3)', fontSize: 14 }}>
-          {completed ? '✓' : '○'}
-        </span>
+        <span style={{ color: completed ? '#08120b' : 'var(--text-3)', fontSize: 15, fontWeight: 700 }}>✓</span>
       </button>
 
-      {/* Delete (only if more than one set) */}
-      {canDelete && (
-        confirmDel ? (
-          <div className="flex gap-1 shrink-0">
-            <button onClick={() => setConfirmDel(false)} className="text-[11px] px-1.5" style={{ color: 'var(--text-3)' }}>No</button>
-            <button onClick={del} className="text-[11px] px-1.5" style={{ color: 'var(--red)' }}>Borrar</button>
-          </div>
-        ) : (
-          <button onClick={() => setConfirmDel(true)} className="shrink-0 text-[14px] px-1" style={{ color: 'var(--text-3)' }}>×</button>
-        )
-      )}
+      {/* Borrar: toque → confirmación roja 2.5 s → toque = borrar */}
+      {canDelete ? (
+        <button
+          onClick={() => { if (confirmDel) { del() } else { setConfirmDel(true); vibrate(10) } }}
+          className="text-[14px] h-9 flex items-center justify-center rounded-lg transition-colors"
+          style={confirmDel
+            ? { color: '#fff', background: 'var(--red)' }
+            : { color: 'var(--text-3)' }}
+        >
+          ×
+        </button>
+      ) : <span />}
 
-      {/* Saving indicator */}
+      {/* Guardando */}
       {status === 'saving' && (
-        <span className="shrink-0 w-1 h-1 rounded-full saving" style={{ background: 'var(--text-3)' }} />
+        <span className="absolute top-1.5 right-1.5 w-1 h-1 rounded-full saving" style={{ background: 'var(--text-3)' }} />
       )}
     </div>
   )
