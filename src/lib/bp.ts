@@ -44,7 +44,16 @@ export function bluetoothAvailable(): boolean {
 const VIATOM_SERVICE = '14839ac4-7d7e-415c-9a42-167340cf2339'
 const VIATOM_WRITE = '8b00ace7-eb0b-49b0-bbe9-9aee0a26e1a3'
 const VIATOM_NOTIFY = '0734594a-a8e7-4b1a-a6b1-cd5243059a57'
+// Algunos Lepu hablan el mismo protocolo sobre Nordic UART o FFE0
+const NUS_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e'
+const NUS_WRITE = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'
+const NUS_NOTIFY = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'
+const FFE0_SERVICE = '0000ffe0-0000-1000-8000-00805f9b34fb'
+const FFE1_CHAR = '0000ffe1-0000-1000-8000-00805f9b34fb'
+const BPS_SERVICE = '00001810-0000-1000-8000-00805f9b34fb'
 const LEPU_CMD_RT_DATA = 0x08
+
+const CANDIDATE_SERVICES = [VIATOM_SERVICE, BPS_SERVICE, NUS_SERVICE, FFE0_SERVICE]
 
 // CRC-8 (poly 0x07), tabla igual que BleCRC.java del SDK de Viatom
 const CRC8_TABLE = (() => {
@@ -178,23 +187,39 @@ export async function readBloodPressure(
   // en el advertisement → si el filtrado no lo encuentra, `anyDevice` lista TODO
   // lo cercano y el usuario elige; el servicio correcto se detecta al conectar.
   const request = anyDevice
-    ? { acceptAllDevices: true, optionalServices: [VIATOM_SERVICE, 'blood_pressure'] }
+    ? { acceptAllDevices: true, optionalServices: CANDIDATE_SERVICES }
     : {
         filters: [
           { services: [VIATOM_SERVICE] },        // Checkme / Viatom / Wellue
           { services: ['blood_pressure'] },      // perfil estándar
-          { namePrefix: 'BP2' }, { namePrefix: 'Checkme' }, { namePrefix: 'BP' },
-          { namePrefix: 'LP' }, { namePrefix: 'Viatom' }, { namePrefix: 'Wellue' },
-          { namePrefix: 'AirBP' },
+          { namePrefix: 'BP' }, { namePrefix: 'Checkme' }, { namePrefix: 'LP' },
+          { namePrefix: 'Viatom' }, { namePrefix: 'Wellue' }, { namePrefix: 'AirBP' },
         ],
-        optionalServices: [VIATOM_SERVICE, 'blood_pressure'],
+        optionalServices: CANDIDATE_SERVICES,
       }
   const device = await bt.requestDevice(request).catch(() => { throw new Error('Selección cancelada') })
 
   onProgress({ phase: 'conectando', message: `Conectando con ${device.name ?? 'el tensiómetro'}…` })
-  const server = await device.gatt.connect()
+  let server = await device.gatt.connect()
 
   const cleanup = () => { try { device.gatt?.disconnect() } catch { /* ya desconectado */ } }
+
+  // Android tarda en descubrir servicios justo tras conectar (carrera GATT):
+  // reintenta el descubrimiento y, si hace falta, reconecta una vez.
+  async function discoverServices(): Promise<any[]> {
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      try {
+        const list = await server.getPrimaryServices()
+        if (list.length > 0) return list
+      } catch { /* aún no descubiertos */ }
+      onProgress({ phase: 'conectando', message: `Buscando servicios (${attempt}/4)…` })
+      await new Promise(r => setTimeout(r, 800))
+      if (!device.gatt.connected) {
+        try { server = await device.gatt.connect() } catch { /* reintento siguiente */ }
+      }
+    }
+    return []
+  }
 
   try {
     return await new Promise<BpReading>((resolve, reject) => {
@@ -204,9 +229,12 @@ export async function readBloodPressure(
       function fail(e: Error) { clearTimeout(timer); stopPoll?.(); reject(e) }
 
       ;(async () => {
-        // 1) Perfil estándar
-        const std = await server.getPrimaryService('blood_pressure').catch(() => null)
-        if (std) {
+        const services = await discoverServices()
+        const uuids = new Set(services.map((s: any) => String(s.uuid).toLowerCase()))
+
+        // 1) Perfil GATT estándar
+        if (uuids.has(BPS_SERVICE)) {
+          const std = services.find((s: any) => String(s.uuid).toLowerCase() === BPS_SERVICE)
           const ch = await std.getCharacteristic('blood_pressure_measurement')
           ch.addEventListener('characteristicvaluechanged', (e: any) => {
             try {
@@ -218,13 +246,33 @@ export async function readBloodPressure(
           onProgress({ phase: 'midiendo', message: 'Conectado. Inicia la medición en el tensiómetro.' })
           return
         }
-        // 2) Checkme / Viatom
-        const svc = await server.getPrimaryService(VIATOM_SERVICE).catch(() => null)
-        if (!svc) throw new Error('El dispositivo no expone un servicio de tensión conocido.')
-        const notify = await svc.getCharacteristic(VIATOM_NOTIFY)
-        const write = await svc.getCharacteristic(VIATOM_WRITE)
+
+        // 2) Protocolo Lepu sobre el transporte que exponga el aparato
+        let writeCh: any = null
+        let notifyCh: any = null
+        if (uuids.has(VIATOM_SERVICE)) {
+          const svc = services.find((s: any) => String(s.uuid).toLowerCase() === VIATOM_SERVICE)
+          notifyCh = await svc.getCharacteristic(VIATOM_NOTIFY)
+          writeCh = await svc.getCharacteristic(VIATOM_WRITE)
+        } else if (uuids.has(NUS_SERVICE)) {
+          const svc = services.find((s: any) => String(s.uuid).toLowerCase() === NUS_SERVICE)
+          notifyCh = await svc.getCharacteristic(NUS_NOTIFY)
+          writeCh = await svc.getCharacteristic(NUS_WRITE)
+        } else if (uuids.has(FFE0_SERVICE)) {
+          const svc = services.find((s: any) => String(s.uuid).toLowerCase() === FFE0_SERVICE)
+          notifyCh = await svc.getCharacteristic(FFE1_CHAR)
+          writeCh = notifyCh
+        }
+
+        if (!writeCh || !notifyCh) {
+          const seen = services.length
+            ? `Servicios visibles: ${services.map((s: any) => shortUuid(String(s.uuid))).join(', ')}`
+            : 'No se pudo descubrir ningún servicio (¿la app ViHealth sigue conectada al aparato?)'
+          throw new Error(`Este dispositivo no expone un servicio de tensión conocido. ${seen}. Pásame esto y lo añado.`)
+        }
+
         const frames = new LepuFrameBuffer()
-        notify.addEventListener('characteristicvaluechanged', (e: any) => {
+        notifyCh.addEventListener('characteristicvaluechanged', (e: any) => {
           const chunk = new Uint8Array(e.target.value.buffer)
           for (const f of frames.push(chunk)) {
             if (f.cmd !== LEPU_CMD_RT_DATA) continue
@@ -233,12 +281,15 @@ export async function readBloodPressure(
             else if (progress) onProgress(progress)
           }
         })
-        await notify.startNotifications()
+        await notifyCh.startNotifications()
         onProgress({ phase: 'midiendo', message: 'Conectado al Checkme. Inicia la medición en el aparato.' })
         // sondeo de datos en tiempo real (como el RtTask del SDK oficial: cada 500 ms)
+        const canNoResp = !!writeCh.properties?.writeWithoutResponse
         const poll = setInterval(async () => {
           try {
-            await write.writeValueWithoutResponse(lepuCmd(LEPU_CMD_RT_DATA))
+            const cmd = lepuCmd(LEPU_CMD_RT_DATA)
+            if (canNoResp) await writeCh.writeValueWithoutResponse(cmd)
+            else await writeCh.writeValue(cmd)
           } catch { /* desconexión: el timeout global lo captura */ }
         }, 500)
         stopPoll = () => clearInterval(poll)
@@ -248,4 +299,9 @@ export async function readBloodPressure(
   } finally {
     cleanup()
   }
+}
+
+function shortUuid(u: string): string {
+  const m = u.match(/^0000([0-9a-f]{4})-0000-1000-8000-00805f9b34fb$/i)
+  return m ? `0x${m[1]}` : u
 }
