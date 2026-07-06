@@ -69,13 +69,25 @@ const TRANSTEK_INDICATE = '00008a91-0000-1000-8000-00805f9b34fb'
 const TRANSTEK_NOTIFY = '00008a92-0000-1000-8000-00805f9b34fb'
 const K_TRANSTEK_PW = 'triax.bp.transtek.pw.'   // + device.id → hex de 4 bytes
 
-// Lista amplia: lo que no esté aquí, Web Bluetooth ni siquiera nos deja verlo.
-const CANDIDATE_SERVICES = [
+// Lista base: lo que no esté declarado, Web Bluetooth ni siquiera nos deja verlo.
+const CORE_SERVICES = [
   VIATOM_SERVICE, BPS_SERVICE, NUS_SERVICE, FFE0_SERVICE, FFF0_SERVICE, DIS_SERVICE,
   TRANSTEK_SERVICE, 'battery_service',
   sig16(0x1808), sig16(0x181b), sig16(0x181d), // glucosa · body composition · báscula (por si acaso)
   sig16(0xffe5), sig16(0xffb0), sig16(0xfee0), sig16(0xfee1), sig16(0xfff5),
+  sig16(0x8a80), sig16(0xa600), sig16(0x7888), sig16(0x788a), // vecinos Transtek/Lifesense
 ]
+
+// Barrido amplio de páginas 16-bit típicas de sanitarios y vendors (0x18xx,
+// 0xFDxx-0xFFxx): garantiza que el servicio real del aparato sea VISIBLE en el
+// diagnóstico aunque no lo conozcamos. Si Chrome rechazara la lista larga, el
+// requestDevice cae a CORE_SERVICES automáticamente.
+const CANDIDATE_SERVICES = (() => {
+  const set = new Set<string>(CORE_SERVICES)
+  for (let x = 0x1800; x <= 0x18ff; x++) set.add(sig16(x))
+  for (let x = 0xfd00; x <= 0xffff; x++) set.add(sig16(x))
+  return Array.from(set)
+})()
 
 function hexBytes(u: Uint8Array, max = 16): string {
   return Array.from(u.slice(0, max)).map(b => b.toString(16).padStart(2, '0')).join(' ')
@@ -231,7 +243,16 @@ export async function readBloodPressure(
         ],
         optionalServices: CANDIDATE_SERVICES,
       }
-  const device = await bt.requestDevice(request).catch(() => { throw new Error('Selección cancelada') })
+  const device = await bt.requestDevice(request).catch(async (e: unknown) => {
+    // Lista larga rechazada por el navegador → reintenta con la lista base
+    if (e instanceof TypeError) {
+      const fallback = anyDevice
+        ? { acceptAllDevices: true, optionalServices: CORE_SERVICES }
+        : { ...request, optionalServices: CORE_SERVICES }
+      return bt.requestDevice(fallback).catch(() => { throw new Error('Selección cancelada') })
+    }
+    throw new Error('Selección cancelada')
+  })
 
   onProgress({ phase: 'conectando', message: `Conectando con ${device.name ?? 'el tensiómetro'}…` })
   let server = await device.gatt.connect()
@@ -266,18 +287,27 @@ export async function readBloodPressure(
         const services = await discoverServices()
         const uuids = new Set(services.map((s: any) => String(s.uuid).toLowerCase()))
 
-        // 1) Perfil GATT estándar
+        // 1) Perfil GATT estándar — puede requerir emparejamiento del sistema,
+        // y al conectar suele volcar TODAS las lecturas memorizadas: esperamos
+        // un respiro tras la última y guardamos la más reciente.
         if (uuids.has(BPS_SERVICE)) {
           const std = services.find((s: any) => String(s.uuid).toLowerCase() === BPS_SERVICE)
           const ch = await std.getCharacteristic('blood_pressure_measurement')
+          let lastReading: BpReading | null = null
+          let settleTimer: number | undefined
           ch.addEventListener('characteristicvaluechanged', (e: any) => {
             try {
               const r = parseStandardBpm(e.target.value)
-              if (r) done(r)
+              if (!r) return
+              lastReading = r
+              onProgress({ phase: 'midiendo', message: `Recibiendo lecturas… última ${r.sys}/${r.dia}` })
+              window.clearTimeout(settleTimer)
+              settleTimer = window.setTimeout(() => { if (lastReading) done(lastReading) }, 2200)
             } catch { /* paquete malformado: se ignora y se espera el siguiente */ }
           })
+          onProgress({ phase: 'conectando', message: 'Activando lecturas… acepta el EMPAREJAMIENTO si el móvil lo pide.' })
           await ch.startNotifications()
-          onProgress({ phase: 'midiendo', message: 'Conectado. Inicia la medición en el tensiómetro.' })
+          onProgress({ phase: 'midiendo', message: 'Conectado. Haz la medición (o enviará las memorizadas).' })
           return
         }
 
