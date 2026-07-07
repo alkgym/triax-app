@@ -89,11 +89,15 @@ function BpCapture() {
   }
 
   const [failedOnce, setFailedOnce] = useState(false)
+  const [log, setLog] = useState<string[]>([])
 
   async function readBle(anyDevice = false) {
-    setBusy(true); setStatus('')
+    setBusy(true); setStatus(''); setLog([])
     try {
-      const r = await readBloodPressure((p: BpProgress) => setStatus(p.message), { anyDevice })
+      const r = await readBloodPressure((p: BpProgress) => setStatus(p.message), {
+        anyDevice,
+        onLog: line => setLog(l => [...l, line].slice(-60)),
+      })
       await db.bpLogs.add({
         date: todayIso(), timestamp: Date.now(),
         sys: r.sys, dia: r.dia, pulse: r.pulse, source: r.source,
@@ -108,6 +112,10 @@ function BpCapture() {
       setBusy(false)
       setTimeout(() => setStatus(s => s.startsWith('✓') ? '' : s), 4000)
     }
+  }
+
+  async function copyLog() {
+    try { await navigator.clipboard.writeText(log.join('\n')); vibrate(20) } catch { /* sin permiso */ }
   }
 
   return (
@@ -140,6 +148,17 @@ function BpCapture() {
       ) : (
         <div className="text-[11px]" style={{ color: 'var(--text-3)' }}>
           Lectura directa del Checkme disponible en Chrome (Android/escritorio). En iPhone, registra a mano.
+        </div>
+      )}
+      {log.length > 0 && (
+        <div className="rounded-lg p-2 space-y-1" style={{ background: '#0a0a0a', border: '1px solid var(--border)' }}>
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] uppercase" style={{ color: 'var(--text-3)', letterSpacing: '0.08em' }}>Diagnóstico BLE</span>
+            <button onClick={copyLog} className="text-[11px] px-2 py-0.5 rounded" style={{ color: 'var(--accent)', border: '1px solid var(--border-strong)' }}>Copiar</button>
+          </div>
+          <pre className="num text-[10px] leading-snug overflow-x-auto whitespace-pre-wrap" style={{ color: 'var(--text-2)', maxHeight: 180 }}>
+{log.join('\n')}
+          </pre>
         </div>
       )}
       {status && (

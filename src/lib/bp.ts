@@ -222,9 +222,11 @@ function parseStandardBpm(v: DataView): BpReading | null {
  */
 export async function readBloodPressure(
   onProgress: (p: BpProgress) => void,
-  opts: { anyDevice?: boolean; timeoutMs?: number } = {},
+  opts: { anyDevice?: boolean; timeoutMs?: number; onLog?: (line: string) => void } = {},
 ): Promise<BpReading> {
-  const { anyDevice = false, timeoutMs = 180_000 } = opts
+  const { anyDevice = false, timeoutMs = 180_000, onLog } = opts
+  const t0 = Date.now()
+  const log = (line: string) => { try { onLog?.(`+${((Date.now() - t0) / 1000).toFixed(1)}s ${line}`) } catch { /* */ } }
   if (!bluetoothAvailable()) {
     throw new Error('Este navegador no soporta Web Bluetooth. Úsalo en Chrome (Android/escritorio) o registra la lectura a mano.')
   }
@@ -292,6 +294,7 @@ export async function readBloodPressure(
         if (finished || reconnecting) return
         reconnecting = true
         stopPoll?.()
+        log('⚠ desconexión GATT — esperando a reconectar')
         onProgress({ phase: 'conectando', message: 'El tensiómetro cortó la conexión — MIDE ahora; me reconecto solo al terminar…' })
         for (let i = 0; i < 60 && !finished; i++) {
           await new Promise(r => setTimeout(r, 2000))
@@ -310,6 +313,7 @@ export async function readBloodPressure(
       async function runSession(): Promise<void> {
         const services = await discoverServices()
         const uuids = new Set(services.map((s: any) => String(s.uuid).toLowerCase()))
+        log(`servicios: ${services.map((s: any) => shortUuid(String(s.uuid))).join(', ') || '(ninguno)'}`)
 
         // 1) Perfil GATT estándar — puede requerir emparejamiento del sistema,
         // y al conectar suele volcar TODAS las lecturas memorizadas: esperamos
@@ -430,30 +434,47 @@ export async function readBloodPressure(
             return null
           }
 
+          log(`FF00 características: ${layout}`)
+
           let gotFrame = false
           for (const c of chars) {
             if (!c.properties?.notify && !c.properties?.indicate) continue
             c.addEventListener('characteristicvaluechanged', (e: any) => {
               const d = new Uint8Array(e.target.value.buffer)
               gotFrame = true
+              log(`◀ ${shortUuid(String(c.uuid))} (${d.length}B): ${hexBytes(d, 24)}`)
               const r = tryParse(d)
-              if (r) { done(r); return }
-              onProgress({ phase: 'midiendo', message: `Trama ${shortUuid(String(c.uuid))}: ${hexBytes(d, 20)} — pásame esto.` })
+              if (r) { log(`✓ PARSED sys=${r.sys} dia=${r.dia} pul=${r.pulse ?? '?'}`); done(r); return }
+              onProgress({ phase: 'midiendo', message: `Trama ${shortUuid(String(c.uuid))}: ${hexBytes(d, 20)}` })
             })
-            try { await c.startNotifications() } catch { /* alguna no permite suscripción */ }
+            try { await c.startNotifications(); log(`suscrito a ${shortUuid(String(c.uuid))}`) }
+            catch (e) { log(`no pude suscribir ${shortUuid(String(c.uuid))}: ${e instanceof Error ? e.message : e}`) }
           }
           onProgress({ phase: 'midiendo', message: `Conectado (FF00 · ${layout}). HAZ LA MEDICIÓN ahora.` })
-          // Probe suave si hay silencio: comando de lectura del protocolo v1
-          window.setTimeout(async () => {
-            if (gotFrame) return
-            const probe = new Uint8Array([0xfd, 0xfd, 0xfa, 0x05, 0x0d, 0x0a])
-            for (const c of chars) {
+
+          // Batería de comandos de arranque: muchos de estos aparatos no emiten
+          // hasta recibir un "kick" en la característica de escritura. Probamos
+          // varios candidatos conocidos, espaciados, y registramos cada envío.
+          const writable = chars.filter((c: any) => c.properties?.write || c.properties?.writeWithoutResponse)
+          const kicks: [string, Uint8Array][] = [
+            ['v1-read', new Uint8Array([0xfd, 0xfd, 0xfa, 0x05, 0x0d, 0x0a])],
+            ['sync-51', new Uint8Array([0x51, 0x26, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xa2])],
+            ['req-all', new Uint8Array([0x5a, 0x0a, 0x01])],
+            ['ping-aa', new Uint8Array([0xaa, 0x01, 0x01])],
+            ['hist-4d', new Uint8Array([0x4d])],
+          ]
+          const sendKick = async (name: string, bytes: Uint8Array) => {
+            for (const c of writable) {
               try {
-                if (c.properties?.writeWithoutResponse) await c.writeValueWithoutResponse(probe)
-                else if (c.properties?.write) await c.writeValue(probe)
-              } catch { /* característica no escribible en la práctica */ }
+                if (c.properties?.writeWithoutResponse) await c.writeValueWithoutResponse(bytes)
+                else await c.writeValue(bytes)
+                log(`▶ ${name} → ${shortUuid(String(c.uuid))}: ${hexBytes(bytes)}`)
+              } catch (e) { log(`▶ ${name} → ${shortUuid(String(c.uuid))} FALLÓ: ${e instanceof Error ? e.message : e}`) }
             }
-          }, 3500)
+          }
+          kicks.forEach(([name, bytes], i) => {
+            window.setTimeout(() => { if (!gotFrame && !finished) void sendKick(name, bytes) }, 3000 + i * 2500)
+          })
           return
         }
 
