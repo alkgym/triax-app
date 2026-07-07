@@ -374,7 +374,66 @@ export async function readBloodPressure(
           return
         }
 
-        // 3) Protocolo Lepu sobre el transporte que exponga el aparato
+        // 3) Servicio vendor 0xFF00 (Transtek TMB-2288 y similares): exploración
+        // guiada — enumera características, escucha todo y prueba los formatos
+        // de medición conocidos sobre cada trama recibida.
+        if (uuids.has(sig16(0xff00))) {
+          const svc = services.find((s: any) => String(s.uuid).toLowerCase() === sig16(0xff00))
+          const chars: any[] = await svc.getCharacteristics()
+          const propsOf = (c: any) => ['read', 'write', 'writeWithoutResponse', 'notify', 'indicate']
+            .filter(p => c.properties?.[p]).map(p => p === 'writeWithoutResponse' ? 'wnr' : p).join('/')
+          const layout = chars.map((c: any) => `${shortUuid(String(c.uuid))}[${propsOf(c)}]`).join(' · ')
+
+          const tryParse = (d: Uint8Array): BpReading | null => {
+            const plaus = (sys: number, dia: number, pul?: number) =>
+              sys >= 80 && sys <= 230 && dia >= 40 && dia <= 140 && sys - dia >= 15 &&
+              (pul == null || (pul >= 35 && pul <= 190))
+            // v1 Transtek: len 8 → sys@3, dia@4, pulso@5 (u8)
+            if (d.length === 8 && plaus(d[3], d[4], d[5])) return { sys: d[3], dia: d[4], pulse: d[5], source: 'ble-checkme' }
+            // v2 Transtek: len 17 → sys@6, dia@8, pulso@12 (u8)
+            if (d.length === 17 && plaus(d[6], d[8], d[12])) return { sys: d[6], dia: d[8], pulse: d[12], source: 'ble-checkme' }
+            // v3-like: u16le en 1/3/11
+            if (d.length >= 13 && plaus(u16le(d, 1), u16le(d, 3), u16le(d, 11))) {
+              return { sys: u16le(d, 1), dia: u16le(d, 3), pulse: u16le(d, 11), source: 'ble-checkme' }
+            }
+            // barrido de triple u8 consecutivo (sys,dia,pulso) — acepta solo si hay UNA coincidencia
+            const hits: number[] = []
+            for (let i = 0; i + 2 < d.length; i++) if (plaus(d[i], d[i + 1], d[i + 2])) hits.push(i)
+            if (hits.length === 1) {
+              const i = hits[0]
+              return { sys: d[i], dia: d[i + 1], pulse: d[i + 2], source: 'ble-checkme' }
+            }
+            return null
+          }
+
+          let gotFrame = false
+          for (const c of chars) {
+            if (!c.properties?.notify && !c.properties?.indicate) continue
+            c.addEventListener('characteristicvaluechanged', (e: any) => {
+              const d = new Uint8Array(e.target.value.buffer)
+              gotFrame = true
+              const r = tryParse(d)
+              if (r) { done(r); return }
+              onProgress({ phase: 'midiendo', message: `Trama ${shortUuid(String(c.uuid))}: ${hexBytes(d, 20)} — pásame esto.` })
+            })
+            try { await c.startNotifications() } catch { /* alguna no permite suscripción */ }
+          }
+          onProgress({ phase: 'midiendo', message: `Conectado (FF00 · ${layout}). HAZ LA MEDICIÓN ahora.` })
+          // Probe suave si hay silencio: comando de lectura del protocolo v1
+          window.setTimeout(async () => {
+            if (gotFrame) return
+            const probe = new Uint8Array([0xfd, 0xfd, 0xfa, 0x05, 0x0d, 0x0a])
+            for (const c of chars) {
+              try {
+                if (c.properties?.writeWithoutResponse) await c.writeValueWithoutResponse(probe)
+                else if (c.properties?.write) await c.writeValue(probe)
+              } catch { /* característica no escribible en la práctica */ }
+            }
+          }, 3500)
+          return
+        }
+
+        // 4) Protocolo Lepu sobre el transporte que exponga el aparato
         let writeCh: any = null
         let notifyCh: any = null
         if (uuids.has(VIATOM_SERVICE)) {
