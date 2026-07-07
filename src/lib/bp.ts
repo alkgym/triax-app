@@ -279,11 +279,35 @@ export async function readBloodPressure(
   try {
     return await new Promise<BpReading>((resolve, reject) => {
       let stopPoll: (() => void) | undefined
+      let finished = false
+      let reconnecting = false
       const timer = setTimeout(() => fail(new Error('Tiempo agotado: no llegó ninguna medición. Haz la medición en el aparato con la app conectada.')), timeoutMs)
-      const done = (r: BpReading) => { clearTimeout(timer); stopPoll?.(); resolve(r) }
-      function fail(e: Error) { clearTimeout(timer); stopPoll?.(); reject(e) }
+      const done = (r: BpReading) => { finished = true; clearTimeout(timer); stopPoll?.(); resolve(r) }
+      function fail(e: Error) { finished = true; clearTimeout(timer); stopPoll?.(); reject(e) }
 
-      ;(async () => {
+      // Muchos tensiómetros CORTAN el Bluetooth al empezar a medir y solo
+      // empujan el resultado al reconectar (patrón MedM). Si el aparato corta,
+      // esperamos a que reaparezca y relanzamos la sesión entera.
+      device.addEventListener('gattserverdisconnected', async () => {
+        if (finished || reconnecting) return
+        reconnecting = true
+        stopPoll?.()
+        onProgress({ phase: 'conectando', message: 'El tensiómetro cortó la conexión — MIDE ahora; me reconecto solo al terminar…' })
+        for (let i = 0; i < 60 && !finished; i++) {
+          await new Promise(r => setTimeout(r, 2000))
+          if (finished) break
+          try {
+            server = await device.gatt.connect()
+            onProgress({ phase: 'conectando', message: 'Reconectado — recuperando la medición…' })
+            reconnecting = false
+            void runSession().catch((e: unknown) => { if (!finished) fail(e instanceof Error ? e : new Error(String(e))) })
+            return
+          } catch { /* sigue apagado/midiendo */ }
+        }
+        reconnecting = false
+      })
+
+      async function runSession(): Promise<void> {
         const services = await discoverServices()
         const uuids = new Set(services.map((s: any) => String(s.uuid).toLowerCase()))
 
@@ -485,7 +509,9 @@ export async function readBloodPressure(
         }, 500)
         stopPoll = () => clearInterval(poll)
         device.addEventListener('gattserverdisconnected', () => clearInterval(poll), { once: true })
-      })().catch(fail)
+      }
+
+      runSession().catch((e: unknown) => { if (!finished) fail(e instanceof Error ? e : new Error(String(e))) })
     })
   } finally {
     cleanup()
