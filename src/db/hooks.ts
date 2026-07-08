@@ -23,7 +23,10 @@ export function useAutosave<T>(value: T, save: (v: T) => Promise<void> | void, d
         setStatus('idle')
       }
     }, delay)
-    return () => { if (timer.current) window.clearTimeout(timer.current) }
+    return () => {
+      if (timer.current) window.clearTimeout(timer.current)
+      if (savedTimer.current) window.clearTimeout(savedTimer.current)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value])
 
@@ -31,5 +34,5 @@ export function useAutosave<T>(value: T, save: (v: T) => Promise<void> | void, d
 }
 
 export function vibrate(ms: number | number[] = 25) {
-  if ('vibrate' in navigator) navigator.vibrate(ms as any)
+  if ('vibrate' in navigator) navigator.vibrate(ms)
 }

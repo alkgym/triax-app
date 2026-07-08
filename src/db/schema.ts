@@ -1,6 +1,9 @@
 import Dexie, { type Table } from 'dexie'
 
-export type WorkoutType = 'push' | 'pull' | 'fullbody' | 'swim' | 'bike' | 'run' | 'brick' | 'rest'
+export type WorkoutType =
+  | 'push' | 'pull' | 'fullbody' | 'legs' | 'torso'
+  | 'swim' | 'bike' | 'run' | 'brick' | 'rest'
+  | 'bike_indoor' | 'swim_pool' | 'gym_free'
 
 export type Phase = 'base' | 'build' | 'peak' | 'taper'
 
@@ -61,6 +64,7 @@ export interface GearItem {
 export interface PlanDay {
   id?: number
   date: string              // ISO yyyy-mm-dd
+  slot?: number             // 0 = primary, 1 = secondary (double session), etc.
   weekNumber: number        // 1..21
   phase: Phase
   type: WorkoutType
@@ -70,6 +74,7 @@ export interface PlanDay {
   targetDurationMin?: number
   intensity?: string        // "Z2", "Z3-4", "tempo", "intervals"
   drill?: string            // for swim
+  timeOfDay?: 'AM' | 'PM'   // hint for double-session ordering display
   isDeload?: boolean
   isBrick?: boolean
 }
@@ -86,19 +91,32 @@ export interface WorkoutSession {
   durationMin?: number
   avgHR?: number
   rpe?: number              // 1-10 perceived effort
+  avgPaceSecPerKm?: number  // for run/bike: seconds per km
+  avgPaceSec100m?: number   // for swim: seconds per 100m
+  cadence?: number          // rpm (bike) or spm (run)
+  elevationM?: number       // metres gained
+  // extra (unplanned) sessions
+  isExtra?: boolean
+  extraTitle?: string       // custom label for extra sessions
+  // ── lesión lumbar ──
+  painProvoked?: number     // 0-10 dolor lumbar provocado por esta sesión
+  painLocations?: PainLocation[]
 }
 
 export interface SetLog {
   id?: number
+  uuid?: string             // stable client UUID — identifies the row across reorderings/renames
   sessionId: number
-  exercise: string
-  exerciseOrder: number
+  templateId?: number       // reference to ExerciseTemplate.id (when known) — survives renames
+  exercise: string          // denormalised name (kept in sync via cascade)
+  exerciseOrder: number     // denormalised order (kept in sync)
   setNumber: number
   reps?: number
   weight?: number
   rir?: number
   completed: boolean
   notes?: string
+  painProvoked?: number     // 0-10 dolor lumbar provocado por este ejercicio/serie
 }
 
 export interface BodyMetric {
@@ -117,6 +135,54 @@ export interface PersonalRecord {
   date: string
 }
 
+// ─────────────────────────────────────────────────────────────
+// LESIÓN LUMBAR — abombamiento discal L2-L5 (ver memoria clínica)
+// ─────────────────────────────────────────────────────────────
+
+export type PainLocation = 'L2-L3' | 'L3-L4' | 'L4-L5' | 'radicular' | 'general'
+
+export type TimeOfDay = 'wake' | 'AM' | 'PM' | 'night'  // wake = recién despertado (ventana vulnerable)
+
+// Qué provocó / contexto del registro de dolor
+export type PainContext =
+  | 'reposo' | 'manana' | 'tras-gym' | 'tras-correr' | 'tras-bici'
+  | 'tras-nadar' | 'tras-futbol' | 'tras-sentarse' | 'tras-dormir' | 'otro'
+
+export interface PainLog {
+  id?: number
+  date: string                 // ISO yyyy-mm-dd
+  timeOfDay: TimeOfDay
+  level: number                // 0 (sin dolor) … 10 (máximo)
+  locations: PainLocation[]
+  context: PainContext
+  trigger?: string             // texto libre: qué crees que lo provocó
+  notes?: string
+  // check-in del día siguiente: enlaza con la actividad del día previo
+  nextDayOf?: string           // ISO de la actividad que evalúas (p.ej. fútbol de ayer)
+  timestamp: number
+}
+
+// Horario semanal: qué rutina toca cada día (dow 0=lunes … 6=domingo)
+export interface DaySchedule {
+  dow: number               // 0=Lun, 1=Mar, 2=Mié, 3=Jue, 4=Vie, 5=Sáb, 6=Dom
+  type: WorkoutType         // gym type | 'rest'
+}
+
+export type RehabPhase = 1 | 2 | 3   // 1 McKenzie/centralización · 2 McGill isométrico · 3 integración dinámica
+export type RehabCategory = 'mckenzie' | 'mcgill' | 'antirotacion' | 'movilidad-cadera' | 'descompresion' | 'core-neutro'
+
+export interface RehabExercise {
+  id?: number
+  name: string
+  phase: RehabPhase
+  category: RehabCategory
+  cues: string                 // ejecución / claves de seguridad
+  why: string                  // por qué ayuda según el diagnóstico
+  painMax: number              // dolor máx (0-10) hasta el que es apropiado
+  sets?: string                // dosis sugerida
+  active: boolean
+}
+
 export class TriDB extends Dexie {
   profile!: Table<Profile, string>
   exerciseTemplates!: Table<ExerciseTemplate, number>
@@ -127,6 +193,9 @@ export class TriDB extends Dexie {
   prs!: Table<PersonalRecord, number>
   nutrition!: Table<NutritionEntry, number>
   gear!: Table<GearItem, number>
+  painLogs!: Table<PainLog, number>
+  rehabExercises!: Table<RehabExercise, number>
+  schedule!: Table<DaySchedule, number>
 
   constructor() {
     super('TriAxApp')
@@ -149,6 +218,115 @@ export class TriDB extends Dexie {
       prs: '++id, exercise, date',
       nutrition: '++id, date, meal',
       gear: '++id, category, active',
+    })
+    // v3: remove unique constraint on sessions.date → allow multiple sessions per day (extras)
+    this.version(3).stores({
+      profile: 'id',
+      exerciseTemplates: '++id, type, order, active',
+      planDays: '++id, &date, weekNumber, phase, type',
+      sessions: '++id, date, type, completedAt, isExtra',
+      sets: '++id, sessionId, exercise, exerciseOrder, setNumber',
+      bodyMetrics: '++id, date',
+      prs: '++id, exercise, date',
+      nutrition: '++id, date, meal',
+      gear: '++id, category, active',
+    })
+
+    // v5 will be defined below — multi-session days. First, the existing v4:
+    // v4: tracker integrity — add stable uuid + templateId to sets.
+    //   • All future writes go through transactions; uuid is the canonical key.
+    //   • Backfill uuid for existing rows; backfill templateId by joining on (sessionType, order, name).
+    this.version(4).stores({
+      profile: 'id',
+      exerciseTemplates: '++id, type, order, active',
+      planDays: '++id, &date, weekNumber, phase, type',
+      sessions: '++id, date, type, completedAt, isExtra',
+      sets: '++id, &uuid, sessionId, templateId, exercise, exerciseOrder, setNumber, [sessionId+templateId+setNumber]',
+      bodyMetrics: '++id, date',
+      prs: '++id, exercise, date',
+      nutrition: '++id, date, meal',
+      gear: '++id, category, active',
+    }).upgrade(async tx => {
+      const sessionsTable = tx.table('sessions')
+      const tplTable = tx.table('exerciseTemplates')
+      const setsTable = tx.table('sets')
+
+      const [allSessions, allTemplates] = await Promise.all([
+        sessionsTable.toArray(),
+        tplTable.toArray(),
+      ])
+      const sessionType = new Map<number, string>(allSessions.map((s: any) => [s.id, s.type]))
+
+      const ensureUuid = (() => {
+        if (typeof crypto !== 'undefined' && (crypto as any).randomUUID) return () => (crypto as any).randomUUID() as string
+        return () => 'u-' + Math.random().toString(36).slice(2) + Date.now().toString(36)
+      })()
+
+      await setsTable.toCollection().modify((s: any) => {
+        if (!s.uuid) s.uuid = ensureUuid()
+        if (s.templateId == null) {
+          const sessType = sessionType.get(s.sessionId)
+          if (sessType) {
+            const tpl = allTemplates.find((t: any) =>
+              t.type === sessType && t.order === s.exerciseOrder && t.name === s.exercise)
+            if (tpl?.id != null) s.templateId = tpl.id
+          }
+        }
+      })
+    })
+
+    // v5: multi-session days — drop unique constraint on planDays.date, add `slot` field.
+    //   • slot=0 is the primary session of the day. slot=1+ are secondary planned sessions.
+    //   • Compound index [date+slot] lets us fetch all sessions for a date in order.
+    //   • Backfill: every existing PlanDay gets slot=0.
+    this.version(5).stores({
+      profile: 'id',
+      exerciseTemplates: '++id, type, order, active',
+      planDays: '++id, date, slot, weekNumber, phase, type, [date+slot]',
+      sessions: '++id, date, type, completedAt, isExtra',
+      sets: '++id, &uuid, sessionId, templateId, exercise, exerciseOrder, setNumber, [sessionId+templateId+setNumber]',
+      bodyMetrics: '++id, date',
+      prs: '++id, exercise, date',
+      nutrition: '++id, date, meal',
+      gear: '++id, category, active',
+    }).upgrade(async tx => {
+      await tx.table('planDays').toCollection().modify((p: any) => {
+        if (p.slot == null) p.slot = 0
+      })
+    })
+
+    // v6: módulo de lesión lumbar — registro de dolor + biblioteca de ejercicios de rehab.
+    //   • painLogs: serie temporal de dolor (nivel, ubicación, contexto, check-in día siguiente).
+    //   • rehabExercises: biblioteca clínica (fase, categoría, contraindicaciones implícitas).
+    this.version(6).stores({
+      profile: 'id',
+      exerciseTemplates: '++id, type, order, active',
+      planDays: '++id, date, slot, weekNumber, phase, type, [date+slot]',
+      sessions: '++id, date, type, completedAt, isExtra',
+      sets: '++id, &uuid, sessionId, templateId, exercise, exerciseOrder, setNumber, [sessionId+templateId+setNumber]',
+      bodyMetrics: '++id, date',
+      prs: '++id, exercise, date',
+      nutrition: '++id, date, meal',
+      gear: '++id, category, active',
+      painLogs: '++id, date, timeOfDay, level, context, [date+timeOfDay]',
+      rehabExercises: '++id, phase, category, active',
+    })
+
+    // v7: horario semanal (día → rutina). Conduce el volumen semanal por grupo
+    // y la sugerencia "hoy toca X".
+    this.version(7).stores({
+      profile: 'id',
+      exerciseTemplates: '++id, type, order, active',
+      planDays: '++id, date, slot, weekNumber, phase, type, [date+slot]',
+      sessions: '++id, date, type, completedAt, isExtra',
+      sets: '++id, &uuid, sessionId, templateId, exercise, exerciseOrder, setNumber, [sessionId+templateId+setNumber]',
+      bodyMetrics: '++id, date',
+      prs: '++id, exercise, date',
+      nutrition: '++id, date, meal',
+      gear: '++id, category, active',
+      painLogs: '++id, date, timeOfDay, level, context, [date+timeOfDay]',
+      rehabExercises: '++id, phase, category, active',
+      schedule: 'dow',
     })
   }
 }
