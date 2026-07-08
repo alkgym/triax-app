@@ -282,6 +282,10 @@ function DataPanel() {
       prs: await db.prs.toArray(),
       nutrition: await db.nutrition.toArray(),
       gear: await db.gear.toArray(),
+      // ── datos que NO se re-siembran: deben viajar en el backup o se pierden ──
+      painLogs: await db.painLogs.toArray(),
+      rehabExercises: await db.rehabExercises.toArray(),
+      schedule: await db.schedule.toArray(),
     }
     const blob = new Blob([JSON.stringify(dump, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
@@ -326,9 +330,21 @@ function DataPanel() {
         await db.exerciseTemplates.clear()
         await db.exerciseTemplates.bulkAdd(dump.exerciseTemplates.map((s: any) => { const { id: _id, ...rest } = s; return rest }))
       }
+      if (dump.planDays?.length) {
+        await db.planDays.clear()
+        await db.planDays.bulkAdd(dump.planDays.map((s: any) => { const { id: _id, ...rest } = s; return rest }))
+      }
       if (dump.painLogs?.length) {
         await db.painLogs.clear()
         await db.painLogs.bulkAdd(dump.painLogs.map((s: any) => { const { id: _id, ...rest } = s; return rest }))
+      }
+      if (dump.rehabExercises?.length) {
+        await db.rehabExercises.clear()
+        await db.rehabExercises.bulkAdd(dump.rehabExercises.map((s: any) => { const { id: _id, ...rest } = s; return rest }))
+      }
+      if (dump.schedule?.length) {
+        await db.schedule.clear()
+        await db.schedule.bulkPut(dump.schedule)
       }
       if (dump.profile?.length) {
         await db.profile.bulkPut(dump.profile)
