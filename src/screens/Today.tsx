@@ -12,6 +12,7 @@ import { RestTimer } from '../components/RestTimer'
 import { motion, AnimatePresence } from 'framer-motion'
 import { FocusMode } from '../components/FocusMode'
 import { useWorkoutSession, isGymType, type WorkoutSessionState, type ExerciseBlock } from '../hooks/useWorkoutSession'
+import { saveWeight } from '../lib/weight'
 
 // Rutinas de gym disponibles (las que tienen plantillas seedeadas / creadas por el usuario)
 const GYM_ROUTINE_META: Record<string, { label: string; color: string }> = {
@@ -377,7 +378,7 @@ function QuickWeight({ lastWeight }: { lastWeight?: number }) {
     const n = Number(val.replace(',', '.'))
     if (!n || saving) return
     setSaving(true)
-    await db.bodyMetrics.put({ date: todayIso(), weight: n })
+    await saveWeight(todayIso(), n)
     setSaving(false)
     setEditing(false)
     setVal('')
@@ -515,8 +516,19 @@ function ExerciseCard({ index, block, state, currentDate, accentColor }: {
     const best = pastSets
       .filter(s => earlierIds.has(s.sessionId) && s.completed && s.weight != null)
       .reduce((m, s) => Math.max(m, s.weight!), 0)
-    const last = earlier[0]
-    const lastSets = pastSets.filter(s => s.sessionId === last.id).sort((a, b) => a.setNumber - b.setNumber)
+    // Sesión de referencia: la MÁS reciente que de verdad tenga peso anotado
+    // para este ejercicio. Si la semana pasada no registré peso, retrocede a
+    // la anterior que sí lo tenga — así el objetivo nunca sale a 0 / en blanco.
+    const setsBySession = new Map<number, SetLog[]>()
+    for (const s of pastSets) {
+      if (!earlierIds.has(s.sessionId)) continue
+      const arr = setsBySession.get(s.sessionId!)
+      if (arr) arr.push(s)
+      else setsBySession.set(s.sessionId!, [s])
+    }
+    const hasWeight = (arr: SetLog[] | undefined) => !!arr?.some(s => s.weight != null && s.weight > 0)
+    const last = earlier.find(s => hasWeight(setsBySession.get(s.id!))) ?? earlier[0]
+    const lastSets = (setsBySession.get(last.id!) ?? []).slice().sort((a, b) => a.setNumber - b.setNumber)
     // Histórico: mejor peso completado por sesión (ascendente, últimas 10)
     const maxBySession = new Map<number, number>()
     for (const s of pastSets) {

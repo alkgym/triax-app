@@ -10,6 +10,7 @@ import { WeeklySummary } from '../components/WeeklySummary'
 import { WeightPainChart } from '../components/WeightPainChart'
 import { ScreenHeader } from '../components/ScreenHeader'
 import { isGymType } from '../hooks/useWorkoutSession'
+import { saveWeight, latestByDate, latestWeight } from '../lib/weight'
 
 type Tab = 'resumen' | 'gym' | 'cardio' | 'peso'
 
@@ -52,7 +53,7 @@ function ResumenTab() {
   const today = todayIso()
   const sessions = useLiveQuery(() => db.sessions.toArray())
   const pains = useLiveQuery(() => db.painLogs.orderBy('date').toArray())
-  const lastWeight = useLiveQuery(async () => (await db.bodyMetrics.orderBy('date').reverse().limit(1).toArray())[0])
+  const lastWeight = useLiveQuery(async () => latestWeight(await db.bodyMetrics.toArray()))
 
   if (!sessions || !pains) return <div className="text-[13px]" style={{ color: 'var(--text-3)' }}>Cargando…</div>
 
@@ -188,11 +189,13 @@ function PesoTab() {
   const [w, setW] = useState('')
   const [date, setDate] = useState(todayIso())
   async function add() {
-    if (!w) return
-    await db.bodyMetrics.put({ date, weight: Number(w) })
+    const n = Number(String(w).replace(',', '.'))
+    if (!n) return
+    await saveWeight(date, n)
     setW('')
   }
-  const data = (metrics ?? []).filter(m => m.weight != null).map(m => ({ date: m.date.slice(5), peso: m.weight! }))
+  const rows = latestByDate(metrics)
+  const data = rows.filter(m => m.weight != null).map(m => ({ date: m.date.slice(5), peso: m.weight! }))
   return (
     <div className="space-y-3">
       <div className="card p-3">
@@ -215,7 +218,7 @@ function PesoTab() {
       </div>
       <WeightPainChart />
       <div className="card p-3 space-y-1">
-        {(metrics ?? []).slice().reverse().map(m => <MetricRow key={m.id} metric={m} />)}
+        {rows.slice().reverse().map(m => <MetricRow key={m.id} metric={m} />)}
       </div>
     </div>
   )
