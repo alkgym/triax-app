@@ -1,0 +1,19 @@
+services:
+  triax-sync:
+    image: python:3.12-alpine
+    container_name: triax-sync
+    restart: unless-stopped
+    command: python3 /app/server.py
+    working_dir: /app
+    environment:
+      - SYNC_DB=/data/sync.db
+      - PORT=8000
+    volumes:
+      - ./server.py:/app/server.py:ro
+      - ./data:/data
+    networks:
+      - web
+
+networks:
+  web:
+    external: true

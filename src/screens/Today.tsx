@@ -1,315 +1,910 @@
 import { useLiveQuery } from 'dexie-react-hooks'
-import { useEffect, useState } from 'react'
-import { useParams, Link } from 'react-router-dom'
-import { db, type SetLog, type WorkoutSession } from '../db/schema'
-import { todayIso, fmtDate, greetingFor } from '../lib/dates'
-import { TYPE_META, PHASE_META } from '../lib/types'
+import { useEffect, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
+import { db, type SetLog, type WorkoutSession, type WorkoutType } from '../db/schema'
+import { todayIso, fmtDate, greetingFor, addDays } from '../lib/dates'
+import { checkContraindication, suggestedPhase, REHAB_PHASE_META } from '../lib/rehab'
+import { WeekStrip } from '../components/WeekStrip'
+import { useScheduledType } from '../components/ScheduleEditor'
 import { useAutosave, vibrate } from '../db/hooks'
 import { SaveIndicator } from '../components/SaveIndicator'
-import { RestTimer } from '../components/RestTimer'
+import { FloatingRestTimer } from '../components/FloatingRestTimer'
+import { SessionSummary, type SessionStats } from '../components/SessionSummary'
+import { startRest, stopRest } from '../lib/restTimer'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Confetti } from '../components/Confetti'
-import { MacrosCard } from '../components/MacrosCard'
-import { ZonesCard } from '../components/ZonesCard'
-import { NutritionLog } from '../components/NutritionLog'
-import { parseGpx } from '../lib/gpx'
+import { FocusMode } from '../components/FocusMode'
+import { useWorkoutSession, isGymType, type WorkoutSessionState, type ExerciseBlock } from '../hooks/useWorkoutSession'
+import { upsertWeight, startRoutine } from '../db/queries'
+import { setE1RM, bestE1RM, parseRepTarget, suggestProgression } from '../lib/progression'
+import { MonthCalendar } from '../components/MonthCalendar'
+import { TYPE_COLORS } from '../lib/colors'
+
+// Rutinas de gym disponibles (las que tienen plantillas seedeadas / creadas por el usuario)
+const GYM_ROUTINE_META: Record<string, { label: string; color: string }> = {
+  push:     { label: 'Push',      color: TYPE_COLORS.push },
+  pull:     { label: 'Pull',      color: TYPE_COLORS.pull },
+  fullbody: { label: 'Full Body', color: TYPE_COLORS.fullbody },
+  legs:     { label: 'Legs',      color: TYPE_COLORS.legs },
+  torso:    { label: 'Torso',     color: TYPE_COLORS.torso },
+}
 
 export default function Today() {
-  const params = useParams<{ date?: string }>()
-  const date = params.date ?? todayIso()
-  const isAlternateDay = date !== todayIso()
+  const today = todayIso()
+  const [date, setDate] = useState(today)
+  const [showCal, setShowCal] = useState(false)
+  const isToday = date === today
   const profile = useLiveQuery(() => db.profile.get('me'))
-  const planDay = useLiveQuery(() => db.planDays.where('date').equals(date).first(), [date])
-  const session = useLiveQuery(async () => {
-    const s = await db.sessions.where('date').equals(date).first()
-    if (s) return s
-    return null
-  }, [date])
   const lastWeight = useLiveQuery(async () => {
     const all = await db.bodyMetrics.orderBy('date').reverse().limit(1).toArray()
     return all[0]
   })
+  const primary = useLiveQuery(
+    () => db.sessions.where('date').equals(date).filter(s => !s.isExtra).first() ?? null,
+    [date],
+  ) as WorkoutSession | null | undefined
+  const todaysPain = useLiveQuery(() => db.painLogs.where('date').equals(date).toArray(), [date])
+  // Tipos de gym con plantillas activas → rutinas lanzables
+  const gymTypes = useLiveQuery(async () => {
+    const tpls = await db.exerciseTemplates.filter(t => t.active && isGymType(t.type)).toArray()
+    const types = Array.from(new Set(tpls.map(t => t.type)))
+    return types.sort()
+  })
 
-  const [celebrate, setCelebrate] = useState(false)
-  const [confettiKey, setConfettiKey] = useState(0)
+  const activeGymType: WorkoutType | null =
+    primary && isGymType(primary.type) ? primary.type : null
+  const scheduledType = useScheduledType(date)
 
-  if (!planDay) {
-    const start = profile?.inicioPlan ?? '2026-05-04'
-    const diffDays = Math.round((new Date(start + 'T00:00:00').getTime() - new Date(date + 'T00:00:00').getTime()) / 86400000)
-    return (
-      <div className="px-4 pt-4 pb-8 space-y-4">
-        <header>
-          <div className="text-bone2 text-xs uppercase tracking-widest">{greetingFor()}, Alex</div>
-          <h1 className="display text-bone text-3xl leading-tight">{fmtDate(date)}</h1>
-        </header>
-        <div className="card p-5 text-center space-y-2">
-          <div className="text-5xl">🎬</div>
-          <div className="display text-bone text-xl">Pre-temporada</div>
-          {diffDays > 0 ? (
-            <p className="text-bone2 text-sm">El plan oficial arranca en <span className="text-orange display text-base">{diffDays} días</span> ({start}). Mientras tanto, registra peso/notas o ajusta plantillas en <b>EDIT</b>.</p>
-          ) : (
-            <p className="text-bone2 text-sm">No hay sesión programada para hoy. Descansa o registra una nota.</p>
-          )}
-        </div>
-        {lastWeight?.weight != null && (
-          <div className="card p-3 text-center">
-            <div className="text-[10px] uppercase tracking-widest text-bone2">Último peso</div>
-            <div className="display text-bone text-3xl">{lastWeight.weight}<span className="text-bone2 text-sm ml-1">kg</span></div>
-          </div>
-        )}
-        <NotesField date={date} />
-      </div>
-    )
+  async function chooseRoutine(type: WorkoutType) {
+    await startRoutine(date, type)
+    vibrate(20)
   }
 
-  const meta = TYPE_META[planDay.type]
-  const phase = PHASE_META[planDay.phase]
-  const isGym = planDay.type === 'push' || planDay.type === 'pull' || planDay.type === 'fullbody'
-  const isDiscipline = !isGym && planDay.type !== 'rest'
-
-  async function ensureSession(): Promise<WorkoutSession> {
-    const existing = await db.sessions.where('date').equals(date).first()
-    if (existing) return existing
-    const id = await db.sessions.add({
-      date, type: planDay!.type, startedAt: Date.now(), notes: '',
-    })
-    return (await db.sessions.get(id))!
+  async function cancelRoutine() {
+    const s = await db.sessions.where('date').equals(date).filter(x => !x.isExtra).first()
+    if (!s?.id) return
+    // limpia solo las series SIN datos (ni completadas ni con reps anotadas):
+    // lo que ya registraste nunca se borra al cambiar de rutina
+    const sets = await db.sets.where('sessionId').equals(s.id).toArray()
+    const pristine = sets.filter(x => !x.completed && x.reps == null)
+    await db.sets.bulkDelete(pristine.map(x => x.id!))
+    await db.sessions.update(s.id, { type: 'rest', completedAt: undefined } as any)
+    vibrate(30)
   }
 
-  async function complete() {
-    const s = await ensureSession()
-    await db.sessions.update(s.id!, { completedAt: Date.now() })
-    vibrate([60, 30, 60, 30, 120])
-    setCelebrate(true)
-    setConfettiKey(k => k + 1)
-    setTimeout(() => setCelebrate(false), 2400)
-  }
+  const lastPain = (todaysPain ?? []).slice().sort((a, b) => b.timestamp - a.timestamp)[0]
+  const firstName = profile?.nombre?.split(' ')[0] ?? 'Alex'
 
   return (
     <div className="px-4 pt-4 pb-8 space-y-4">
-      {isAlternateDay && (
-        <Link to="/" className="chip text-orange border-orange w-full justify-center">← Volver a HOY · entrenando {fmtDate(date)}</Link>
-      )}
-      <header className="flex items-end justify-between">
-        <div>
-          <div className="text-bone2 text-xs uppercase tracking-widest">{isAlternateDay ? 'Sesión' : `${greetingFor()}, Alex`}</div>
-          <h1 className="display text-bone text-3xl leading-tight">{fmtDate(date)}</h1>
+      <header>
+        <div className="flex items-center justify-between">
+          <div className="eyebrow">{isToday ? `${greetingFor()}, ${firstName}` : 'Editando otro día'}</div>
+          <div className="flex items-center gap-1">
+            <button onClick={() => { setDate(addDays(date, -1)); vibrate(10) }} className="px-2.5 py-1 text-[15px] rounded-lg"
+              style={{ color: 'var(--text-2)', border: '1px solid var(--border)' }}>‹</button>
+            <button onClick={() => { setShowCal(c => !c); vibrate(10) }} className="px-2.5 py-1 text-[13px] rounded-lg"
+              style={{ color: showCal ? 'var(--accent)' : 'var(--text-2)', border: `1px solid ${showCal ? 'var(--border-strong)' : 'var(--border)'}` }}>📅</button>
+            <button onClick={() => { setDate(addDays(date, 1)); vibrate(10) }} disabled={isToday}
+              className="px-2.5 py-1 text-[15px] rounded-lg"
+              style={{ color: 'var(--text-2)', border: '1px solid var(--border)', opacity: isToday ? 0.35 : 1 }}>›</button>
+          </div>
         </div>
-        <div className="text-right">
-          <div className="chip" style={{ borderColor: phase.color, color: phase.color }}>{phase.label}</div>
-          {lastWeight?.weight != null && (
-            <div className="text-bone2 text-xs mt-1">Peso · <span className="text-bone mono">{lastWeight.weight}kg</span></div>
+        <h1 className="font-semibold mt-1 tracking-tight" style={{ color: isToday ? 'var(--text)' : 'var(--accent)', fontSize: 30, letterSpacing: '-0.035em', lineHeight: 1.08 }}>
+          {(() => { const d = fmtDate(date); return d.charAt(0).toUpperCase() + d.slice(1) })()}
+        </h1>
+        <div className="flex items-center gap-3 mt-2 text-[12px]" style={{ color: 'var(--text-2)' }}>
+          <QuickWeight date={date} lastWeight={lastWeight?.weight} />
+          {!isToday && (
+            <button onClick={() => setDate(today)} className="text-[12px] font-medium" style={{ color: 'var(--accent)' }}>
+              ← Volver a hoy
+            </button>
           )}
         </div>
       </header>
 
-      <div className="card p-4 relative overflow-hidden">
-        <div className="absolute inset-x-0 top-0 h-1" style={{ background: meta.color }} />
-        <div className="flex items-center gap-2">
-          <span className="text-2xl">{meta.emoji}</span>
-          <span className="display text-2xl" style={{ color: meta.color }}>{meta.label.toUpperCase()}</span>
-          {planDay.isDeload && <span className="chip text-orange border-orange">DELOAD</span>}
-          {planDay.isBrick && <span className="chip text-yellow-400 border-yellow-400">BRICK</span>}
+      {showCal && <MonthCalendar selected={date} onSelect={d => { setDate(d) }} />}
+
+      {!isToday && (
+        <div className="card p-3 text-[12px]" style={{ borderColor: 'rgba(255,107,43,.4)', background: 'rgba(255,107,43,.06)', color: 'var(--text-2)' }}>
+          Estás viendo el <b style={{ color: 'var(--accent)' }}>{fmtDate(date, { weekday: 'long', day: 'numeric', month: 'short' })}</b>.
+          Todo lo que registres o cambies aquí se guarda en esa fecha — perfecto para apuntar entrenos que se te olvidaron.
         </div>
-        <h2 className="display text-bone text-2xl mt-1">{planDay.title}</h2>
-        {date === '2026-09-27' && (
-          <div className="mt-3 bg-orange/10 border border-orange/40 rounded p-2 text-xs text-bone space-y-1">
-            <div className="display text-orange text-base">🏁 PLAN DE CARRERA</div>
-            <div>· <b>Nado 1km:</b> deslizamiento largo, controlar adrenalina inicial.</div>
-            <div>· <b>T1:</b> goggles fuera, casco antes que dorsal.</div>
-            <div>· <b>Bici 36km:</b> cadencia 88-92 RPM, gel min 25, sostener acoples.</div>
-            <div>· <b>T2:</b> &lt;90s. Zapatillas con elásticos.</div>
-            <div>· <b>Carrera 9km:</b> 1.5km transición, luego 5:30/km estable. Atacar último km.</div>
-          </div>
-        )}
-        <p className="text-bone2 text-sm mt-2 whitespace-pre-line">{planDay.description}</p>
-        {planDay.intensity && <div className="mono text-xs text-bone2 mt-2">→ {planDay.intensity}</div>}
-        {planDay.targetDistanceKm && (
-          <div className="mt-3 grid grid-cols-3 gap-2">
-            {planDay.targetDistanceKm && <Metric label="Distancia" value={`${planDay.targetDistanceKm}`} unit="km" />}
-            {planDay.targetDurationMin && <Metric label="Duración" value={`${planDay.targetDurationMin}`} unit="min" />}
-            <Metric label="Semana" value={`${planDay.weekNumber}`} unit="/21" />
-          </div>
-        )}
-      </div>
-
-      {isGym && <GymBlock date={date} workoutType={planDay.type as any} />}
-      {isDiscipline && <DisciplineBlock date={date} />}
-      {isDiscipline && <ZonesCard type={planDay.type} />}
-      {planDay.type !== 'rest' && <MacrosCard workoutType={planDay.type} />}
-      <NutritionLog date={date} />
-
-      {planDay.type !== 'rest' && (
-        <button onClick={complete} className="btn btn-primary w-full text-base py-4 display">
-          ✓ ENTRENAMIENTO COMPLETADO
-        </button>
       )}
 
-      <Confetti trigger={confettiKey} />
-      <AnimatePresence>
-        {celebrate && (
-          <motion.div initial={{ opacity: 0, scale: 0.85 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
-            transition={{ type: 'spring', stiffness: 220, damping: 16 }}
-            className="fixed inset-0 z-40 flex items-center justify-center bg-ink/70 pointer-events-none">
-            <div className="text-center">
-              <div className="display text-orange text-7xl">¡HECHO!</div>
-              <div className="display text-bone text-xl mt-2 tracking-widest">+1 al casillero</div>
+      <WeekStrip />
+
+      {/* Check-in de dolor del día */}
+      <Link to="/lesion" className="card p-4 flex items-center justify-between gap-3 active:opacity-70 transition-opacity">
+        <div className="min-w-0">
+          <div className="text-[13px] font-medium" style={{ color: 'var(--text)' }}>
+            {lastPain ? 'Dolor registrado hoy' : '¿Cómo está tu espalda hoy?'}
+          </div>
+          <div className="text-[12px] mt-0.5" style={{ color: 'var(--text-3)' }}>
+            {lastPain ? 'Toca para ver evolución y ejercicios' : 'Registra tu dolor lumbar de hoy'}
+          </div>
+        </div>
+        {lastPain
+          ? <span className="num font-bold shrink-0" style={{ fontSize: 32, color: painColor(lastPain.level) }}>{lastPain.level}<span className="text-[12px]" style={{ color: 'var(--text-3)' }}>/10</span></span>
+          : <span className="shrink-0 text-[13px] font-medium px-3 py-1.5 rounded-lg" style={{ color: 'var(--accent)', background: 'var(--surface-2)', border: '1px solid var(--border-strong)' }}>Registrar</span>}
+      </Link>
+
+      {/* Check-in del día siguiente (p.ej. tras fútbol) */}
+      <NextDayCheckin date={date} />
+
+      {/* Guardia de dolor: si hoy duele, ajusta la recomendación */}
+      {lastPain && lastPain.level >= 3 && (() => {
+        const high = lastPain.level >= 6
+        const phase = REHAB_PHASE_META[suggestedPhase(lastPain.level)]
+        const c = high ? '#EF4444' : '#F59E0B'
+        return (
+          <Link to="/lesion" className="card p-4 block active:opacity-70 transition-opacity" style={{ borderColor: `${c}66`, background: `${c}0f` }}>
+            <div className="text-[12px] font-semibold uppercase" style={{ color: c, letterSpacing: '0.05em' }}>
+              {high ? `⚠️ Dolor alto hoy · ${lastPain.level}/10` : `Molestia hoy · ${lastPain.level}/10`}
             </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+            <div className="text-[13px] mt-1" style={{ color: 'var(--text-2)' }}>
+              {high
+                ? `Prioriza ${phase.label} y evita carga pesada/flexión. Toca para ver ejercicios seguros.`
+                : 'Entrena con técnica impecable y lumbar neutra. Toca para ver recomendados.'}
+            </div>
+          </Link>
+        )
+      })()}
 
-      {session?.completedAt && (
-        <div className="text-center text-bone2 text-xs">Completado · {new Date(session.completedAt).toLocaleTimeString('es-ES')}</div>
+      {/* Rutina de gym activa o lanzador */}
+      {activeGymType ? (
+        <GymBlock date={date} workoutType={activeGymType as any} onCancelRoutine={cancelRoutine} />
+      ) : (
+        <RoutineLauncher gymTypes={(gymTypes ?? []) as WorkoutType[]} scheduledType={scheduledType} isToday={isToday} onChoose={chooseRoutine} />
       )}
+
+      {/* Cardio / otros entrenos del día */}
+      <ExtraWorkoutsBlock date={date} />
 
       <NotesField date={date} />
     </div>
   )
 }
 
-function Metric({ label, value, unit }: { label: string; value: string; unit: string }) {
+function painColor(l: number): string {
+  if (l <= 2) return '#22C55E'
+  if (l <= 4) return '#84CC16'
+  if (l <= 6) return '#F59E0B'
+  if (l <= 8) return '#F97316'
+  return '#EF4444'
+}
+
+// Mini-gráfica de progresión: mejor peso por sesión (últimas 10)
+function Sparkline({ points, color }: { points: { w: number }[]; color: string }) {
+  const W = 70, H = 20, pad = 2.5
+  const ws = points.map(p => p.w)
+  const min = Math.min(...ws), max = Math.max(...ws)
+  const span = max - min || 1
+  const step = (W - pad * 2) / (points.length - 1)
+  const x = (i: number) => pad + i * step
+  const y = (w: number) => H - pad - ((w - min) / span) * (H - pad * 2)
+  const d = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(1)} ${y(p.w).toFixed(1)}`).join(' ')
   return (
-    <div className="bg-ink rounded-lg border border-line p-2">
-      <div className="text-[10px] uppercase tracking-widest text-bone2">{label}</div>
-      <div className="display text-bone text-2xl leading-none mt-1">{value}<span className="text-bone2 text-xs ml-1">{unit}</span></div>
+    <svg width={W} height={H} className="shrink-0" aria-hidden="true">
+      <path d={d} fill="none" stroke={color} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" opacity="0.85" />
+      <circle cx={x(points.length - 1)} cy={y(points[points.length - 1].w)} r="2.2" fill={color} />
+    </svg>
+  )
+}
+
+// Celebración al completar el entreno
+function CelebrationOverlay({ show }: { show: boolean }) {
+  const EMOJIS = ['💪', '🔥', '⚡', '🏋️', '✨']
+  return (
+    <AnimatePresence>
+      {show && (
+        <motion.div
+          className="fixed inset-0 z-50 flex items-center justify-center pointer-events-none"
+          initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+          style={{ background: 'rgba(8,8,10,0.72)', backdropFilter: 'blur(4px)', WebkitBackdropFilter: 'blur(4px)' }}>
+          <div className="text-center relative">
+            {Array.from({ length: 10 }).map((_, i) => {
+              const a = (i / 10) * Math.PI * 2
+              return (
+                <motion.span key={i} className="absolute" style={{ left: '50%', top: '38%', fontSize: 22 }}
+                  initial={{ x: 0, y: 0, opacity: 1, scale: 0.5 }}
+                  animate={{ x: Math.cos(a) * 115, y: Math.sin(a) * 95, opacity: 0, scale: 1.25 }}
+                  transition={{ duration: 1.1, ease: 'easeOut' }}>
+                  {EMOJIS[i % EMOJIS.length]}
+                </motion.span>
+              )
+            })}
+            <motion.div
+              initial={{ scale: 0.7 }} animate={{ scale: 1 }}
+              transition={{ type: 'spring', stiffness: 260, damping: 16 }}
+              className="num font-bold gradient-warm" style={{ fontSize: 62, letterSpacing: '-0.04em', lineHeight: 1 }}>
+              ¡Hecho!
+            </motion.div>
+            <div className="text-[14px] mt-2" style={{ color: 'var(--text-2)' }}>Entreno completado 💪</div>
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  )
+}
+
+// Check-in del día siguiente: si ayer hubo entreno(s) y aún no has registrado cómo
+// amaneciste hoy, pregunta. Clave para correlacionar fútbol/sesiones duras ↔ dolor.
+function NextDayCheckin({ date }: { date: string }) {
+  const yesterday = addDays(date, -1)
+  const yAll = useLiveQuery(() => db.sessions.where('date').equals(yesterday).toArray(), [yesterday])
+  const already = useLiveQuery(
+    () => db.painLogs.where('date').equals(date).filter(p => p.nextDayOf === yesterday).first(),
+    [date, yesterday],
+  )
+  // Solo cuenta entrenos reales (no días de solo-notas / descanso)
+  const ySessions = (yAll ?? []).filter(s => s.type !== 'rest' && (!!s.completedAt || !!s.isExtra || !!s.startedAt))
+  if (!yAll) return null
+  if (ySessions.length === 0) return null
+  if (already) return null
+
+  const labels = Array.from(new Set(ySessions.map(s => s.extraTitle || GYM_ROUTINE_META[s.type]?.label || labelForType(s.type)))).filter(Boolean)
+  const summary = labels.slice(0, 3).join(', ')
+
+  async function log(level: number) {
+    await db.painLogs.add({
+      date, timeOfDay: 'wake', level, locations: [], context: 'tras-dormir',
+      nextDayOf: yesterday, trigger: summary ? `tras: ${summary}` : undefined, timestamp: Date.now(),
+    })
+    vibrate(20)
+  }
+
+  return (
+    <div className="card p-4 space-y-3" style={{ borderColor: 'rgba(124,92,255,.35)' }}>
+      <div>
+        <div className="text-[13px] font-medium" style={{ color: 'var(--text)' }}>¿Cómo amaneciste hoy?</div>
+        <div className="text-[12px] mt-0.5" style={{ color: 'var(--text-3)' }}>
+          Ayer: {summary || 'entrenaste'}. Registra el dolor al despertar para ver cómo te afecta.
+        </div>
+      </div>
+      <div className="flex items-center gap-1.5 flex-wrap">
+        {Array.from({ length: 11 }, (_, i) => i).map(n => (
+          <button key={n} onClick={() => log(n)}
+            className="num w-8 h-8 rounded-lg text-[13px] font-medium transition-transform active:scale-90"
+            style={{ color: painColor(n), background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+            {n}
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
 
-function GymBlock({ date, workoutType }: { date: string; workoutType: 'push' | 'pull' | 'fullbody' }) {
-  const templates = useLiveQuery(() => db.exerciseTemplates.where('type').equals(workoutType).and(t => t.active).toArray(), [workoutType])
-  const session = useLiveQuery(() => db.sessions.where('date').equals(date).first(), [date])
-  const sets = useLiveQuery(async () => {
-    if (!session?.id) return []
-    return db.sets.where('sessionId').equals(session.id).toArray()
-  }, [session?.id])
+function labelForType(t: string): string {
+  const map: Record<string, string> = {
+    run: 'Correr', bike: 'Bici', bike_indoor: 'Bici indoor', swim: 'Nado', swim_pool: 'Piscina',
+    futbol: 'Fútbol', gym_free: 'Gym libre', rest: 'Descanso',
+  }
+  return map[t] ?? t
+}
 
-  // Ensure session + set rows exist
-  useEffect(() => {
-    (async () => {
-      if (!templates) return
-      let s = await db.sessions.where('date').equals(date).first()
-      if (!s) {
-        const id = await db.sessions.add({ date, type: workoutType, startedAt: Date.now(), notes: '' })
-        s = await db.sessions.get(id)
-      }
-      if (!s) return
-      const existing = await db.sets.where('sessionId').equals(s.id!).count()
-      if (existing === 0) {
-        const rows: Omit<SetLog, 'id'>[] = []
-        templates.sort((a, b) => a.order - b.order).forEach(t => {
-          for (let i = 1; i <= t.series; i++) {
-            rows.push({
-              sessionId: s!.id!, exercise: t.name, exerciseOrder: t.order, setNumber: i,
-              reps: undefined, weight: t.pesoSugerido, completed: false,
-            })
-          }
-        })
-        await db.sets.bulkAdd(rows as SetLog[])
-      }
-    })()
-  }, [templates, date, workoutType])
+// Etiqueta el dolor lumbar provocado por un ejercicio (se guarda en todas sus series).
+function PainTagger({ block, state }: { block: ExerciseBlock; state: WorkoutSessionState }) {
+  const current = block.setRows.find(s => s.painProvoked != null)?.painProvoked
+  const [open, setOpen] = useState(current != null)
 
-  if (!templates || !sets) return <div className="text-bone2 text-sm">Cargando ejercicios…</div>
+  async function setPain(level: number | null) {
+    for (const s of block.setRows) {
+      if (s.uuid) await state.updateSet(s.uuid, { painProvoked: level ?? undefined })
+    }
+    vibrate(15)
+  }
 
-  // Group sets by exercise
-  const grouped = new Map<string, SetLog[]>()
-  sets.forEach(s => {
-    if (!grouped.has(s.exercise)) grouped.set(s.exercise, [])
-    grouped.get(s.exercise)!.push(s)
-  })
+  if (!open) {
+    return (
+      <button onClick={() => setOpen(true)} className="text-[12px]" style={{ color: 'var(--text-3)' }}>
+        + dolor lumbar
+      </button>
+    )
+  }
+  return (
+    <div className="space-y-1.5">
+      <div className="text-[11px]" style={{ color: 'var(--text-3)' }}>Dolor lumbar provocado</div>
+      <div className="flex items-center gap-1 flex-wrap">
+        {Array.from({ length: 11 }, (_, i) => i).map(n => (
+          <button key={n} onClick={() => setPain(n)}
+            className="num w-7 h-7 rounded-md text-[12px] font-medium"
+            style={current === n
+              ? { color: '#fff', background: painColor(n), border: `1px solid ${painColor(n)}` }
+              : { color: painColor(n), background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+            {n}
+          </button>
+        ))}
+        {current != null && (
+          <button onClick={() => setPain(null)} className="text-[11px] px-2" style={{ color: 'var(--text-3)' }}>quitar</button>
+        )}
+      </div>
+    </div>
+  )
+}
 
+function RoutineLauncher({ gymTypes, scheduledType, isToday, onChoose }: { gymTypes: WorkoutType[]; scheduledType: WorkoutType | null; isToday: boolean; onChoose: (t: WorkoutType) => void }) {
+  const schedGym = scheduledType && isGymType(scheduledType) ? scheduledType : null
+  const m = schedGym ? (GYM_ROUTINE_META[schedGym] ?? { label: schedGym, color: 'var(--accent)' }) : null
   return (
     <div className="space-y-3">
-      <RestTimer />
-      {templates.sort((a, b) => a.order - b.order).map(t => {
-        const setRows = (grouped.get(t.name) ?? []).sort((a, b) => a.setNumber - b.setNumber)
-        return <ExerciseCard key={t.id} name={t.name} reps={t.reps} rir={t.rir} unit={t.pesoUnidad} sets={setRows} notas={t.notas} currentDate={date} />
-      })}
+      {/* Sugerencia del horario — hero de arranque */}
+      {schedGym && m ? (
+        <button onClick={() => onChoose(schedGym)}
+          className="card w-full p-5 flex items-center justify-between active:opacity-80 transition-opacity relative overflow-hidden"
+          style={{ borderColor: `${m.color}55` }}>
+          <div className="absolute inset-0 pointer-events-none"
+            style={{ background: `radial-gradient(120% 140% at 0% 0%, ${m.color}1f, transparent 55%)` }} />
+          <div className="text-left relative">
+            <div className="text-[11px] font-semibold uppercase" style={{ color: 'var(--text-3)', letterSpacing: '0.08em' }}>{isToday ? 'Hoy toca' : 'Ese día tocaba'}</div>
+            <div className="display text-[30px] font-bold tracking-tight leading-tight" style={{ color: m.color }}>{m.label}</div>
+          </div>
+          <span className="shrink-0 relative text-[14px] font-bold px-5 rounded-xl flex items-center"
+            style={{ background: m.color, color: '#0a0a0a', height: 48, boxShadow: `0 6px 20px ${m.color}55` }}>
+            Empezar →
+          </span>
+        </button>
+      ) : scheduledType === 'rest' ? (
+        <div className="card p-4">
+          <div className="text-[13px] font-medium" style={{ color: 'var(--text)' }}>{isToday ? 'Hoy: descanso programado' : 'Ese día: descanso programado'}</div>
+          <div className="text-[12px] mt-0.5" style={{ color: 'var(--text-3)' }}>Entrena libre si quieres, o haz rehab/movilidad.</div>
+        </div>
+      ) : null}
+
+      <div className="card p-4 space-y-3">
+      <div className="text-[12px] font-semibold uppercase" style={{ color: 'var(--text-3)', letterSpacing: '0.06em' }}>¿Qué entrenas hoy?</div>
+      {gymTypes.length > 0 && (
+        <div className="grid grid-cols-2 gap-2">
+          {gymTypes.map(t => {
+            const m = GYM_ROUTINE_META[t] ?? { label: t, color: 'var(--accent)' }
+            return (
+              <button key={t} onClick={() => onChoose(t)}
+                className="rounded-lg p-3 text-left transition-colors active:opacity-70"
+                style={{ background: 'var(--surface-2)', border: '1px solid var(--border-strong)' }}>
+                <span className="inline-block w-2 h-2 rounded-full mb-1.5" style={{ background: m.color }} />
+                <div className="text-[14px] font-medium" style={{ color: 'var(--text)' }}>{m.label}</div>
+                <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-3)' }}>Registrar series</div>
+              </button>
+            )
+          })}
+        </div>
+      )}
+      <div className="text-[12px]" style={{ color: 'var(--text-3)' }}>
+        Para natación, bici indoor, correr, fútbol u otros, usa <b style={{ color: 'var(--text-2)' }}>Entrenos extra</b> abajo.
+      </div>
+      <Link to="/rutinas" className="btn btn-ghost w-full text-sm">Ver y editar rutinas →</Link>
+      </div>
     </div>
   )
 }
 
-function ExerciseCard({ name, reps, rir, unit, sets, notas, currentDate }: { name: string; reps: string; rir?: string; unit?: 'kg' | 'bw'; sets: SetLog[]; notas?: string; currentDate: string }) {
-  const done = sets.filter(s => s.completed).length
+function QuickWeight({ date, lastWeight }: { date: string; lastWeight?: number }) {
+  const [editing, setEditing] = useState(false)
+  const [val, setVal] = useState('')
+  const [saving, setSaving] = useState(false)
 
-  // Find the most recent previous session that logged this exercise
-  const previous = useLiveQuery(async () => {
-    const pastSets = await db.sets.where('exercise').equals(name).toArray()
-    if (pastSets.length === 0) return null
-    const sessIds = Array.from(new Set(pastSets.map(s => s.sessionId)))
-    const sessions = await db.sessions.where('id').anyOf(sessIds).toArray()
-    const earlier = sessions
-      .filter(s => s.date < currentDate)
-      .sort((a, b) => b.date.localeCompare(a.date))
-    if (earlier.length === 0) return null
-    const last = earlier[0]
-    const lastSets = pastSets.filter(s => s.sessionId === last.id).sort((a, b) => a.setNumber - b.setNumber)
-    return { date: last.date, sets: lastSets }
-  }, [name, currentDate])
+  async function save() {
+    const n = Number(val.replace(',', '.'))
+    if (!n || saving) return
+    setSaving(true)
+    await upsertWeight(date, n)
+    setSaving(false)
+    setEditing(false)
+    setVal('')
+    vibrate(20)
+  }
+
+  if (editing) {
+    return (
+      <span className="inline-flex items-center gap-1.5">
+        <input
+          autoFocus
+          inputMode="decimal"
+          placeholder={lastWeight != null ? String(lastWeight) : 'kg'}
+          value={val}
+          onChange={e => setVal(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') save(); if (e.key === 'Escape') { setEditing(false); setVal('') } }}
+          className="num bg-transparent w-14"
+          style={{ color: 'var(--text)', fontWeight: 500, borderBottom: '1px solid var(--text-3)' }}
+        />
+        <button onClick={save} className="text-[12px] font-medium" style={{ color: 'var(--accent)' }} disabled={saving}>
+          {saving ? '…' : 'OK'}
+        </button>
+        <button onClick={() => { setEditing(false); setVal('') }} className="text-[12px]" style={{ color: 'var(--text-3)' }}>
+          ×
+        </button>
+      </span>
+    )
+  }
 
   return (
-    <div className="card p-3">
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="display text-bone text-lg">{name}</div>
-          <div className="text-bone2 text-xs mono">{sets.length} × {reps}{rir ? ` · ${rir} RIR` : ''}{unit === 'bw' ? ' · BW' : ''}</div>
-          {notas && <div className="text-bone2 text-[11px] italic mt-0.5">{notas}</div>}
+    <button onClick={() => setEditing(true)} className="inline-flex items-center gap-1">
+      {lastWeight != null
+        ? <><span className="num" style={{ color: 'var(--text)' }}>{lastWeight}</span> kg</>
+        : <span style={{ color: 'var(--accent)' }}>+ peso</span>}
+    </button>
+  )
+}
+
+function GymBlock({ date, workoutType, onCancelRoutine }: {
+  date: string
+  workoutType: 'push' | 'pull' | 'fullbody' | 'legs' | 'torso'
+  onCancelRoutine: () => void
+}) {
+  const state = useWorkoutSession(date, workoutType)
+  const [celebrate, setCelebrate] = useState(false)
+  const [summaryOpen, setSummaryOpen] = useState(false)
+  const [summaryStats, setSummaryStats] = useState<SessionStats | null>(null)
+
+  const typeColor = TYPE_COLORS[workoutType] ?? TYPE_COLORS.fullbody
+  const session = state.session
+  const sessionDone = !!session?.completedAt
+
+  async function completeWorkout() {
+    if (!session?.id) return
+    const completedAt = Date.now()
+    await db.sessions.update(session.id, { completedAt })
+    vibrate([60, 30, 60, 30, 120])
+    stopRest()
+    const doneSets = state.flatSets.filter(s => s.completed)
+    const volumeKg = doneSets.reduce((a, s) => a + (s.weight ?? 0) * (s.reps ?? 0), 0)
+    const prs = await db.prs.where('date').equals(date).toArray()
+    const rawMin = session.startedAt ? Math.round((completedAt - session.startedAt) / 60000) : null
+    const durationMin = rawMin != null && rawMin >= 1 && rawMin <= 360 ? rawMin : null
+    setSummaryStats({
+      durationMin, volumeKg,
+      setsDone: doneSets.length, setsTotal: state.flatSets.length,
+      exercises: state.blocks.length, prs,
+    })
+    setCelebrate(true)
+    setTimeout(() => { setCelebrate(false); setSummaryOpen(true) }, 1200)
+  }
+
+  async function undoComplete() {
+    if (session?.id) await db.sessions.update(session.id, { completedAt: undefined } as never)
+  }
+
+  if (!state.ready) return <div className="text-[13px]" style={{ color: 'var(--text-3)' }}>Cargando ejercicios…</div>
+  if (state.blocks.length === 0) {
+    return (
+      <div className="card p-4 text-[13px]" style={{ color: 'var(--text-2)' }}>
+        Esta rutina no tiene ejercicios todavía. Añádelos en <Link to="/rutinas" style={{ color: 'var(--accent)' }}>Rutinas</Link>.
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <SessionHeader
+        state={state}
+        accentColor={typeColor}
+        label={GYM_ROUTINE_META[workoutType]?.label ?? workoutType}
+        onCancel={onCancelRoutine}
+      />
+      <FocusModeToggle state={state} accentColor={typeColor} />
+      {state.blocks.map((b, idx) => (
+        <ExerciseCard
+          key={b.blockUuid}
+          index={idx + 1}
+          block={b}
+          state={state}
+          currentDate={date}
+          accentColor={typeColor}
+          restEnabled={!sessionDone && date === todayIso()}
+        />
+      ))}
+      <CompleteButton done={sessionDone} completedAt={session?.completedAt} onComplete={completeWorkout} onUndo={undoComplete} />
+      <FloatingRestTimer />
+      <CelebrationOverlay show={celebrate} />
+      {summaryStats && (
+        <SessionSummary open={summaryOpen} accentColor={typeColor} stats={summaryStats} onClose={() => setSummaryOpen(false)} />
+      )}
+    </div>
+  )
+}
+
+// Cabecera de sesión fija: rutina, crono en vivo, progreso de series y volumen.
+function SessionHeader({ state, accentColor, label, onCancel }: {
+  state: WorkoutSessionState
+  accentColor: string
+  label: string
+  onCancel: () => void
+}) {
+  const session = state.session
+  const total = state.flatSets.length
+  const done = state.flatSets.filter(s => s.completed).length
+  const volumeKg = state.flatSets.reduce((a, s) => s.completed ? a + (s.weight ?? 0) * (s.reps ?? 0) : a, 0)
+  const running = !!session?.startedAt && !session?.completedAt
+
+  const [, tick] = useState(0)
+  useEffect(() => {
+    if (!running) return
+    const id = window.setInterval(() => tick(t => t + 1), 1000)
+    return () => window.clearInterval(id)
+  }, [running])
+
+  const elapsedSec = session?.startedAt
+    ? Math.max(0, Math.floor(((session.completedAt ?? Date.now()) - session.startedAt) / 1000))
+    : null
+  const showClock = elapsedSec != null && elapsedSec < 6 * 3600
+  const hh = elapsedSec != null ? Math.floor(elapsedSec / 3600) : 0
+  const mm = elapsedSec != null ? Math.floor((elapsedSec % 3600) / 60) : 0
+  const ss = elapsedSec != null ? elapsedSec % 60 : 0
+  const clock = hh > 0
+    ? `${hh}:${String(mm).padStart(2, '0')}:${String(ss).padStart(2, '0')}`
+    : `${mm}:${String(ss).padStart(2, '0')}`
+
+  const volLabel = volumeKg >= 1000 ? `${(volumeKg / 1000).toFixed(2)} t` : `${Math.round(volumeKg)} kg`
+  const pct = total > 0 ? (done / total) * 100 : 0
+
+  return (
+    <div className="sticky z-30 rounded-2xl px-4 py-3"
+      style={{
+        top: 8,
+        background: 'rgba(15,15,19,0.88)',
+        border: '1px solid var(--border-strong)',
+        backdropFilter: 'blur(20px) saturate(1.3)',
+        WebkitBackdropFilter: 'blur(20px) saturate(1.3)',
+        boxShadow: '0 12px 32px rgba(0,0,0,0.45), 0 1px 0 rgba(255,255,255,0.04) inset',
+      }}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{ background: accentColor, boxShadow: `0 0 10px ${accentColor}88` }} />
+          <span className="text-[15px] font-semibold tracking-tight truncate" style={{ color: 'var(--text)' }}>{label}</span>
+          {showClock && (
+            <span className="num text-[13px] font-semibold px-2 py-0.5 rounded-lg shrink-0"
+              style={{ color: session?.completedAt ? 'var(--green)' : 'var(--text-2)', background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
+              {clock}
+            </span>
+          )}
         </div>
-        <div className="display text-orange text-2xl">{done}/{sets.length}</div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button onClick={() => { startRest(); vibrate(10) }} className="text-[13px] w-8 h-8 rounded-lg flex items-center justify-center"
+            style={{ color: 'var(--text-2)', background: 'var(--surface-2)', border: '1px solid var(--border)' }} title="Descanso">
+            ⏱
+          </button>
+          <button onClick={onCancel} className="text-[11.5px] px-2 h-8 rounded-lg" style={{ color: 'var(--text-3)' }}>
+            Cambiar
+          </button>
+        </div>
+      </div>
+      <div className="flex items-center gap-3 mt-2.5">
+        <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--surface-2)' }}>
+          <div className="h-full rounded-full" style={{ width: `${pct}%`, background: accentColor, transition: 'width .3s ease', boxShadow: `0 0 8px ${accentColor}66` }} />
+        </div>
+        <span className="num text-[12px] shrink-0" style={{ color: 'var(--text-2)' }}>
+          <b style={{ color: 'var(--text)' }}>{done}</b>/{total} · <b style={{ color: accentColor }}>{volLabel}</b>
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function FocusModeToggle({ state, accentColor }: { state: WorkoutSessionState; accentColor: string }) {
+  const [open, setOpen] = useState(false)
+  const totalSets = state.flatSets.length
+  const doneSets = state.flatSets.filter(s => s.completed).length
+
+  return (
+    <>
+      <button
+        onClick={() => { setOpen(true); vibrate(20) }}
+        className="card w-full p-4 flex items-center justify-between transition-colors active:opacity-70"
+      >
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0"
+            style={{ background: 'var(--surface-2)', border: '1px solid var(--border-strong)' }}>
+            <span style={{ color: accentColor, fontSize: 12 }}>●</span>
+          </div>
+          <div className="text-left min-w-0">
+            <div className="text-[15px] font-medium" style={{ color: 'var(--text)' }}>Modo Enfoque</div>
+            <div className="text-[12px] mt-0.5" style={{ color: 'var(--text-3)' }}>Una serie a la vez · cronómetro auto</div>
+          </div>
+        </div>
+        <div className="text-right shrink-0 ml-3 flex items-center gap-2">
+          <div className="num font-semibold" style={{ color: 'var(--text)', fontSize: 28, lineHeight: 1, letterSpacing: '-0.02em' }}>
+            {doneSets}<span style={{ color: 'var(--text-3)', fontSize: 16 }}>/{totalSets}</span>
+          </div>
+          <span style={{ color: 'var(--text-3)', fontSize: 18 }}>›</span>
+        </div>
+      </button>
+      <AnimatePresence>
+        {open && <FocusMode state={state} accentColor={accentColor} onClose={() => setOpen(false)} />}
+      </AnimatePresence>
+    </>
+  )
+}
+
+function ExerciseCard({ index, block, state, currentDate, accentColor, restEnabled }: {
+  index: number
+  block: ExerciseBlock
+  state: WorkoutSessionState
+  currentDate: string
+  accentColor: string
+  restEnabled: boolean
+}) {
+  const { name, reps, rir, pesoUnidad: unit, notas, setRows: sets, templateId } = block
+  const done = sets.filter(s => s.completed).length
+  const allDone = done === sets.length && sets.length > 0
+  const contra = checkContraindication(name)
+
+  // Previous-session reference: prefer templateId match (rename-safe), fall back to name.
+  const previous = useLiveQuery(async () => {
+    const byTpl = templateId != null
+      ? await db.sets.where('templateId').equals(templateId).toArray()
+      : []
+    const byName = await db.sets.where('exercise').equals(name).toArray()
+    const pastSets = [...byTpl, ...byName.filter(b => !byTpl.some(t => t.id === b.id))]
+    if (pastSets.length === 0) return null
+    const sessIds = Array.from(new Set(pastSets.map(s => s.sessionId)))
+    const sessions = await db.sessions.where('id').anyOf(sessIds).filter(s => !s.isExtra).toArray()
+    const earlier = sessions.filter(s => s.date < currentDate).sort((a, b) => b.date.localeCompare(a.date))
+    if (earlier.length === 0) return null
+    const earlierIds = new Set(earlier.map(s => s.id))
+    // Mejor e1RM histórico (Epley): premia también las mejoras por reps, no solo por kg
+    const best = pastSets
+      .filter(s => earlierIds.has(s.sessionId))
+      .reduce((m, s) => Math.max(m, setE1RM(s) ?? 0), 0)
+    const last = earlier[0]
+    const lastSets = pastSets.filter(s => s.sessionId === last.id).sort((a, b) => a.setNumber - b.setNumber)
+    // Histórico: mejor e1RM por sesión (ascendente, últimas 10)
+    const maxBySession = new Map<number, number>()
+    for (const s of pastSets) {
+      const e1 = earlierIds.has(s.sessionId) ? setE1RM(s) : null
+      if (e1 != null) {
+        maxBySession.set(s.sessionId, Math.max(maxBySession.get(s.sessionId) ?? 0, e1))
+      }
+    }
+    const history = earlier
+      .filter(sess => maxBySession.has(sess.id!))
+      .map(sess => ({ date: sess.date, w: maxBySession.get(sess.id!)! }))
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .slice(-10)
+    return { date: last.date, sets: lastSets, best: best > 0 ? best : null, history }
+  }, [name, templateId, currentDate])
+
+  const isPr = !!(previous?.best != null && bestE1RM(sets) > previous.best!)
+
+  const suggestion = previous
+    ? suggestProgression({
+        target: parseRepTarget(reps),
+        series: block.series,
+        lastSets: previous.sets,
+        bodyweight: unit === 'bw',
+      })
+    : null
+
+  // Ejercicio terminado → tarjeta plegada (menos scroll durante el entreno).
+  // El usuario puede desplegarla; al completar la última serie se vuelve a plegar.
+  const [expandOverride, setExpandOverride] = useState<boolean | null>(null)
+  useEffect(() => { if (!allDone) setExpandOverride(null) }, [allDone])
+  const collapsed = allDone && expandOverride !== true
+
+  if (collapsed) {
+    const bestSet = sets.reduce<SetLog | null>((m, s) => {
+      if (!s.completed || s.weight == null) return m
+      return m == null || (s.weight > (m.weight ?? 0)) ? s : m
+    }, null)
+    return (
+      <button onClick={() => setExpandOverride(true)}
+        className="card w-full px-4 py-3 flex items-center justify-between gap-3 text-left active:opacity-80 transition-opacity"
+        style={{ borderColor: 'rgba(34,197,94,0.35)' }}>
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="shrink-0 w-6 h-6 rounded-md flex items-center justify-center text-[13px]"
+            style={{ background: 'rgba(34,197,94,0.12)', color: 'var(--green)', border: '1px solid rgba(34,197,94,0.35)' }}>
+            ✓
+          </div>
+          <span className="text-[14.5px] font-medium truncate" style={{ color: 'var(--text)' }}>{name}</span>
+          {isPr && <span className="text-[12px] shrink-0">🏆</span>}
+        </div>
+        <span className="num text-[12px] shrink-0" style={{ color: 'var(--text-3)' }}>
+          {bestSet ? `${bestSet.weight}×${bestSet.reps ?? '–'} · ` : ''}{sets.length} series <span style={{ fontSize: 10 }}>▾</span>
+        </span>
+      </button>
+    )
+  }
+
+  return (
+    <div
+      className="card overflow-hidden"
+      style={allDone ? { borderColor: 'rgba(34,197,94,0.4)' } : {}}
+    >
+      {/* Header */}
+      <div className="px-4 pt-4 pb-3 flex items-start justify-between gap-3">
+        <div className="flex items-start gap-3 min-w-0">
+          <div className="shrink-0 w-6 h-6 rounded-md flex items-center justify-center text-[12px] font-medium mt-0.5"
+            style={{ background: 'var(--surface-2)', color: accentColor, border: '1px solid var(--border-strong)' }}>
+            {index}
+          </div>
+          <div className="min-w-0">
+            <div className="text-[16px] font-medium leading-tight flex items-center gap-2" style={{ color: 'var(--text)' }}>
+              {name}
+              {isPr && (
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded shrink-0 pop-check"
+                  style={{ color: '#0a0a0a', background: 'linear-gradient(135deg,#FFD479,#F59E0B)' }}>🏆 PR</span>
+              )}
+            </div>
+            <div className="flex items-center gap-2 mt-1 flex-wrap text-[12px]" style={{ color: 'var(--text-3)' }}>
+              <span className="num">{sets.length} × {reps}</span>
+              {rir && <span style={{ color: 'var(--text-2)' }}>{rir} RIR</span>}
+              {unit === 'bw' && <span>BW</span>}
+            </div>
+            {notas && <div className="text-[12px] mt-1.5" style={{ color: 'var(--text-3)' }}>{notas}</div>}
+          </div>
+        </div>
+
+        <div className="shrink-0 text-right flex items-center gap-2">
+          <span className="num text-[18px] font-semibold" style={{ color: allDone ? 'var(--green)' : 'var(--text)' }}>
+            {done}<span className="text-[12px] font-normal" style={{ color: 'var(--text-3)' }}>/{sets.length}</span>
+          </span>
+          {allDone && (
+            <button onClick={() => setExpandOverride(false)} className="text-[12px] px-1.5 py-1" style={{ color: 'var(--text-3)' }}>▴</button>
+          )}
+        </div>
       </div>
 
-      {previous && (
-        <div className="mt-2 text-[10px] text-bone2 mono">
-          Anterior <span className="text-bone">{previous.date}</span>
-          {' · '}
-          {previous.sets.map((p, i) => (
-            <span key={p.id}>
-              {i > 0 && ' · '}
-              <span className="text-bone">{p.weight ?? '–'}kg×{p.reps ?? '–'}</span>
-            </span>
-          ))}
+      {/* Aviso de contraindicación según el diagnóstico lumbar */}
+      {contra && (
+        <div className="mx-4 mb-3 rounded-lg p-2.5" style={{ background: 'rgba(239,68,68,.07)', border: '1px solid rgba(239,68,68,.3)' }}>
+          <div className="text-[11px] font-semibold" style={{ color: '#EF4444' }}>⛔ Contraindicado · {contra.label}</div>
+          <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-3)' }}>{contra.riesgo}</div>
+          <div className="text-[11px] mt-0.5" style={{ color: '#22C55E' }}>✓ {contra.alternativa}</div>
         </div>
       )}
 
-      <div className="mt-3 space-y-1.5">
+      {/* Previous session reference + progresión */}
+      {previous && (
+        <div className="mx-4 mb-3 space-y-1.5">
+          <div className="flex items-center gap-2 text-[12px]" style={{ color: 'var(--text-3)' }}>
+            <span className="shrink-0">Ant. {previous.date}</span>
+            <div className="flex items-center gap-1.5 flex-wrap flex-1">
+              {previous.sets.map((p, i) => (
+                <span key={p.id} className="num" style={{ color: 'var(--text-2)' }}>
+                  {i > 0 && <span style={{ color: 'var(--text-3)' }} className="mx-1">·</span>}
+                  {p.weight ?? '–'}×{p.reps ?? '–'}
+                </span>
+              ))}
+            </div>
+            {previous.history && previous.history.length >= 2 && (
+              <Sparkline points={previous.history} color={accentColor} />
+            )}
+          </div>
+          {previous.history && previous.history.length >= 2 && (() => {
+            const first = previous.history[0].w
+            const last = previous.history[previous.history.length - 1].w
+            const delta = first > 0 ? Math.round(((last - first) / first) * 100) : 0
+            if (delta === 0) return null
+            return (
+              <div className="text-[10.5px] num" style={{ color: delta > 0 ? 'var(--green)' : 'var(--text-3)' }}>
+                {delta > 0 ? '↗' : '↘'} {delta > 0 ? '+' : ''}{delta}% e1RM en {previous.history.length} sesiones
+              </div>
+            )
+          })()}
+        </div>
+      )}
+
+      {/* Coach de progresión (doble progresión sobre la última sesión) */}
+      {suggestion && !allDone && (
+        <SuggestionChip suggestion={suggestion} sets={sets} state={state} accentColor={accentColor} />
+      )}
+
+      <div className="mx-4 h-px mb-2" style={{ background: 'var(--border)' }} />
+
+      {/* Sets — columnas al estilo app de fitness */}
+      <div className="px-4 grid grid-cols-[24px_minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1fr)_38px_20px] items-center gap-1.5 mb-1.5">
+        {['#', 'Anterior', 'Kg', 'Reps', '', ''].map((h, i) => (
+          <span key={i} className="text-[9.5px] font-semibold uppercase text-center"
+            style={{ color: 'var(--text-3)', letterSpacing: '0.07em' }}>{h}</span>
+        ))}
+      </div>
+      <div className="px-4 space-y-1.5">
         {sets.map(s => {
           const prev = previous?.sets.find(p => p.setNumber === s.setNumber)
-          return <SetRow key={s.id} set={s} prev={prev} />
+          return <SetRow key={s.uuid ?? s.id} set={s} prev={prev} state={state} canDelete={sets.length > 1} restEnabled={restEnabled} />
         })}
       </div>
-      <button
-        className="btn btn-ghost w-full mt-2 text-bone2 text-xs py-1.5"
-        onClick={async () => {
-          if (sets.length === 0) return
-          const last = sets[sets.length - 1]
-          await db.sets.add({
-            sessionId: last.sessionId,
-            exercise: last.exercise,
-            exerciseOrder: last.exerciseOrder,
-            setNumber: last.setNumber + 1,
-            weight: last.weight,
-            completed: false,
-          })
-          vibrate(15)
-        }}
-      >+ Añadir serie extra</button>
+
+      {/* Add set + tagger de dolor */}
+      <div className="px-4 pt-3 pb-4 space-y-3">
+        <button
+          className="w-full py-2.5 rounded-lg text-[12px] font-medium transition-colors"
+          style={{ color: 'var(--text-3)', background: 'transparent', border: '1px dashed var(--border-strong)' }}
+          onClick={async () => {
+            if (templateId == null) return
+            await state.addExtraSet(templateId)
+            vibrate(15)
+          }}
+        >+ serie extra</button>
+        <PainTagger block={block} state={state} />
+      </div>
     </div>
   )
 }
 
-function SetRow({ set, prev }: { set: SetLog; prev?: SetLog }) {
+function SuggestionChip({ suggestion, sets, state, accentColor }: {
+  suggestion: NonNullable<ReturnType<typeof suggestProgression>>
+  sets: SetLog[]
+  state: WorkoutSessionState
+  accentColor: string
+}) {
+  const [applied, setApplied] = useState(false)
+  const c = suggestion.kind === 'add-weight' ? 'var(--green)'
+    : suggestion.kind === 'consolidate' ? '#F59E0B'
+    : accentColor
+  const canApply = suggestion.weight != null && !applied
+
+  async function apply() {
+    if (suggestion.weight == null || applied) return
+    for (const s of sets) {
+      if (!s.completed && s.uuid) await state.updateSet(s.uuid, { weight: suggestion.weight })
+    }
+    setApplied(true)
+    vibrate(20)
+  }
+
+  return (
+    <button
+      onClick={apply}
+      disabled={!canApply}
+      className="mx-4 mb-3 block w-[calc(100%-2rem)] text-left rounded-lg p-2.5 transition-opacity active:opacity-70"
+      style={{ background: 'color-mix(in srgb, currentColor 0%, transparent)', border: `1px solid ${suggestion.kind === 'add-weight' ? 'rgba(34,197,94,.35)' : suggestion.kind === 'consolidate' ? 'rgba(245,158,11,.35)' : 'var(--border-strong)'}` }}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[12px] font-semibold" style={{ color: c }}>
+          {suggestion.kind === 'add-weight' ? '↗ ' : suggestion.kind === 'consolidate' ? '◼ ' : '→ '}{suggestion.label}
+        </span>
+        {suggestion.weight != null && (
+          <span className="text-[11px] shrink-0" style={{ color: applied ? 'var(--green)' : 'var(--text-3)' }}>
+            {applied ? '✓ aplicado' : 'tocar para aplicar'}
+          </span>
+        )}
+      </div>
+      <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-3)' }}>{suggestion.detail}</div>
+    </button>
+  )
+}
+
+function SetRow({ set, prev, state, canDelete, restEnabled }: {
+  set: SetLog; prev?: SetLog; state: WorkoutSessionState; canDelete: boolean; restEnabled: boolean
+}) {
+  const uuid = set.uuid!  // post-migration always present
   const [reps, setReps] = useState<string>(set.reps != null ? String(set.reps) : '')
   const [weight, setWeight] = useState<string>(set.weight != null ? String(set.weight) : '')
   const [completed, setCompleted] = useState(set.completed)
+  const [confirmDel, setConfirmDel] = useState(false)
+  const lastExternalRef = useRef({ reps: set.reps, weight: set.weight, completed: set.completed })
+
+  // confirmación de borrado con auto-reset
+  useEffect(() => {
+    if (!confirmDel) return
+    const id = window.setTimeout(() => setConfirmDel(false), 2500)
+    return () => window.clearTimeout(id)
+  }, [confirmDel])
+
+  // ── External sync (FocusMode etc.) ─────────────────────────────────
+  useEffect(() => {
+    const ext = { reps: set.reps, weight: set.weight, completed: set.completed }
+    const last = lastExternalRef.current
+    if (ext.reps !== last.reps && (ext.reps != null ? String(ext.reps) : '') !== reps) {
+      setReps(ext.reps != null ? String(ext.reps) : '')
+    }
+    if (ext.weight !== last.weight && (ext.weight != null ? String(ext.weight) : '') !== weight) {
+      setWeight(ext.weight != null ? String(ext.weight) : '')
+    }
+    if (ext.completed !== last.completed && ext.completed !== completed) {
+      setCompleted(ext.completed)
+    }
+    lastExternalRef.current = ext
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [set.reps, set.weight, set.completed])
 
   const status = useAutosave({ reps, weight, completed }, async (v) => {
-    await db.sets.update(set.id!, {
+    const patch = {
       reps: v.reps === '' ? undefined : Number(v.reps),
       weight: v.weight === '' ? undefined : Number(v.weight),
       completed: v.completed,
-    })
+    }
+    lastExternalRef.current = { reps: patch.reps, weight: patch.weight, completed: patch.completed }
+    await state.updateSet(uuid, patch)
   })
 
   function fillFromPrev() {
@@ -319,137 +914,430 @@ function SetRow({ set, prev }: { set: SetLog; prev?: SetLog }) {
     vibrate(15)
   }
 
-  const prevText = prev ? `${prev.weight ?? '–'}×${prev.reps ?? '–'}` : ''
+  function toggleCompleted() {
+    const next = !completed
+    // Autorrelleno al completar: si los campos están vacíos, la serie hecha
+    // toma los valores de la última sesión (los del placeholder) — un toque.
+    if (next) {
+      if (weight === '' && prev?.weight != null) setWeight(String(prev.weight))
+      if (reps === '' && prev?.reps != null) setReps(String(prev.reps))
+      if (restEnabled) startRest()
+      vibrate(20)
+    } else {
+      vibrate(10)
+    }
+    setCompleted(next)
+  }
+
+  async function del() {
+    await state.deleteSet(uuid)
+    vibrate(30)
+  }
+
+  const inputStyle = { color: 'var(--text)' } as const
 
   return (
-    <div>
-      <div className="flex items-center gap-2">
-        <div className="display text-bone2 text-sm w-6 text-center">{set.setNumber}</div>
-        <input className="input text-center mono" inputMode="decimal" placeholder={prev?.reps != null ? String(prev.reps) : 'reps'}
-               value={reps} onChange={e => setReps(e.target.value)} />
-        <span className="text-bone2 text-xs">×</span>
-        <input className="input text-center mono" inputMode="decimal" placeholder={prev?.weight != null ? String(prev.weight) : 'kg'}
-               value={weight} onChange={e => setWeight(e.target.value)} />
-        <button onClick={() => { setCompleted(c => !c); vibrate(20) }}
-          className={`btn ${completed ? 'btn-primary' : 'btn-ghost'} px-3 py-2 min-w-12`}>
-          {completed ? '✓' : '○'}
+    <div
+      className="relative rounded-xl px-2 py-1.5 grid grid-cols-[24px_minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,1fr)_38px_20px] items-center gap-1.5"
+      style={{
+        background: completed ? 'rgba(34,197,94,0.07)' : 'var(--surface-2)',
+        border: `1px solid ${completed ? 'rgba(34,197,94,0.28)' : 'var(--border)'}`,
+        transition: 'background .2s ease, border-color .2s ease',
+      }}
+    >
+      {/* nº serie */}
+      <span className="num text-[13px] font-semibold text-center" style={{ color: completed ? 'var(--green)' : 'var(--text-3)' }}>
+        {set.setNumber}
+      </span>
+
+      {/* Anterior — toca para rellenar */}
+      {prev && (prev.weight != null || prev.reps != null) ? (
+        <button onClick={fillFromPrev} disabled={completed}
+          className="num text-[12px] py-1.5 rounded-lg text-center min-w-0 truncate transition-colors"
+          style={{ color: completed ? 'var(--text-3)' : 'var(--text-2)', background: completed ? 'transparent' : 'var(--surface-1)', border: `1px solid ${completed ? 'transparent' : 'var(--border)'}` }}>
+          {prev.weight ?? '–'}×{prev.reps ?? '–'}
         </button>
-        <span className="w-2">{status === 'saving' && <span className="text-bone2 text-xs saving">●</span>}</span>
-      </div>
-      {prev && (
-        <button onClick={fillFromPrev}
-          className="ml-8 mt-0.5 text-[10px] text-bone2 mono hover:text-orange active:text-orange">
-          ← anterior {prevText}kg · toca para copiar
+      ) : (
+        <span className="text-[12px] text-center" style={{ color: 'var(--text-3)' }}>—</span>
+      )}
+
+      {/* KG */}
+      <input
+        className="num w-full bg-transparent text-center font-semibold text-[16px] py-1 focus:outline-none rounded-lg"
+        style={inputStyle}
+        inputMode="decimal"
+        placeholder={prev?.weight != null ? String(prev.weight) : '—'}
+        value={weight}
+        onChange={e => setWeight(e.target.value)}
+      />
+
+      {/* REPS */}
+      <input
+        className="num w-full bg-transparent text-center font-semibold text-[16px] py-1 focus:outline-none rounded-lg"
+        style={inputStyle}
+        inputMode="decimal"
+        placeholder={prev?.reps != null ? String(prev.reps) : '—'}
+        value={reps}
+        onChange={e => setReps(e.target.value)}
+      />
+
+      {/* Completar (arranca descanso) */}
+      <button
+        onClick={toggleCompleted}
+        className="w-[38px] h-9 rounded-lg flex items-center justify-center transition-all active:scale-90"
+        style={completed
+          ? { background: 'var(--green)', border: '1px solid var(--green)' }
+          : { background: 'transparent', border: '1px solid var(--border-strong)' }
+        }
+      >
+        <span style={{ color: completed ? '#08120b' : 'var(--text-3)', fontSize: 15, fontWeight: 700 }}>✓</span>
+      </button>
+
+      {/* Borrar: toque → confirmación roja 2.5 s → toque = borrar */}
+      {canDelete ? (
+        <button
+          onClick={() => { if (confirmDel) { del() } else { setConfirmDel(true); vibrate(10) } }}
+          className="text-[14px] h-9 flex items-center justify-center rounded-lg transition-colors"
+          style={confirmDel
+            ? { color: '#fff', background: 'var(--red)' }
+            : { color: 'var(--text-3)' }}
+        >
+          ×
         </button>
+      ) : <span />}
+
+      {/* Guardando */}
+      {status === 'saving' && (
+        <span className="absolute top-1.5 right-1.5 w-1 h-1 rounded-full saving" style={{ background: 'var(--text-3)' }} />
       )}
     </div>
   )
 }
 
-function DisciplineBlock({ date }: { date: string }) {
-  const session = useLiveQuery(() => db.sessions.where('date').equals(date).first(), [date])
-  const [distance, setDistance] = useState('')
-  const [duration, setDuration] = useState('')
-  const [hr, setHr] = useState('')
-  const [rpe, setRpe] = useState('')
+function CompleteButton({ done, completedAt, onComplete, onUndo }: {
+  done: boolean
+  completedAt?: number
+  onComplete: () => void
+  onUndo: () => void
+}) {
+  const [confirming, setConfirming] = useState(false)
 
-  useEffect(() => {
-    if (session) {
-      setDistance(session.distanceKm != null ? String(session.distanceKm) : '')
-      setDuration(session.durationMin != null ? String(session.durationMin) : '')
-      setHr(session.avgHR != null ? String(session.avgHR) : '')
-      setRpe(session.rpe != null ? String(session.rpe) : '')
-    }
-  }, [session?.id])
-
-  useEffect(() => {
-    (async () => {
-      const s = await db.sessions.where('date').equals(date).first()
-      if (!s) await db.sessions.add({ date, type: 'swim', startedAt: Date.now(), notes: '' } as any)
-    })()
-  }, [date])
-
-  const status = useAutosave({ distance, duration, hr, rpe }, async (v) => {
-    const s = await db.sessions.where('date').equals(date).first()
-    if (!s) return
-    await db.sessions.update(s.id!, {
-      distanceKm: v.distance ? Number(v.distance) : undefined,
-      durationMin: v.duration ? Number(v.duration) : undefined,
-      avgHR: v.hr ? Number(v.hr) : undefined,
-      rpe: v.rpe ? Number(v.rpe) : undefined,
-    })
-  })
+  if (done) {
+    const time = completedAt
+      ? new Date(completedAt).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })
+      : ''
+    return (
+      <div className="space-y-2">
+        <div className="card p-4 flex items-center justify-center gap-3">
+          <span style={{ color: 'var(--green)', fontSize: 18 }}>✓</span>
+          <div className="text-center">
+            <div className="text-[14px] font-medium" style={{ color: 'var(--green)' }}>Completado</div>
+            {time && <div className="text-[12px] num mt-0.5" style={{ color: 'var(--text-3)' }}>{time}</div>}
+          </div>
+        </div>
+        {confirming ? (
+          <div className="flex gap-2">
+            <button onClick={() => setConfirming(false)} className="btn flex-1">Cancelar</button>
+            <button onClick={() => { onUndo(); setConfirming(false) }} className="btn flex-1" style={{ color: 'var(--accent)' }}>Desmarcar</button>
+          </div>
+        ) : (
+          <button onClick={() => setConfirming(true)} className="text-[12px] w-full text-center py-1 transition-colors" style={{ color: 'var(--text-3)' }}>
+            ¿Desmarcar?
+          </button>
+        )}
+      </div>
+    )
+  }
 
   return (
-    <div className="card p-4 space-y-3">
-      <div className="flex items-center justify-between">
-        <div className="display text-bone text-lg">Registro de sesión</div>
-        <SaveIndicator status={status} />
+    <button
+      onClick={onComplete}
+      className="btn btn-primary w-full"
+      style={{
+        height: 60,
+        fontSize: 16,
+        fontWeight: 700,
+        letterSpacing: '0.02em',
+        boxShadow: '0 4px 16px rgba(255,87,34,0.35), 0 1px 0 rgba(255,255,255,0.2) inset',
+      }}
+    >
+      Completar entreno →
+    </button>
+  )
+}
+
+// ── Entrenos extra (cardio / fútbol / gym libre) ────────────────────────────────
+
+type ExtraType = 'swim' | 'bike' | 'run' | 'push' | 'pull' | 'fullbody' | 'bike_indoor' | 'swim_pool' | 'gym_free' | 'futbol'
+
+const EXTRA_TYPES: { type: ExtraType; label: string; color: string }[] = [
+  { type: 'run',         label: 'Correr',     color: '#FF5722' },
+  { type: 'bike_indoor', label: 'Bici indoor',color: '#10B981' },
+  { type: 'bike',        label: 'Bici',       color: '#34D399' },
+  { type: 'swim',        label: 'Nado',       color: '#22D3EE' },
+  { type: 'swim_pool',   label: 'Piscina',    color: '#0EA5E9' },
+  { type: 'futbol',      label: 'Fútbol',     color: '#F97316' },
+  { type: 'gym_free',    label: 'Gym libre',  color: '#F59E0B' },
+  { type: 'push',        label: 'Push',       color: '#FF8A65' },
+  { type: 'pull',        label: 'Pull',       color: '#A78BFA' },
+]
+
+function fmtExtraPace(s: WorkoutSession): string {
+  if (!s.distanceKm || !s.durationMin) return ''
+  if (s.type === 'swim' || s.type === 'swim_pool') {
+    const sec = (s.durationMin * 60) / (s.distanceKm * 10)
+    const m = Math.floor(sec / 60); const ss = Math.round(sec % 60)
+    return `${m}:${ss.toString().padStart(2,'0')}/100m`
+  }
+  if (s.type === 'bike' || s.type === 'bike_indoor') {
+    return `${(s.distanceKm / (s.durationMin / 60)).toFixed(1)} km/h`
+  }
+  if (s.type === 'run') {
+    const sec = (s.durationMin * 60) / s.distanceKm
+    const m = Math.floor(sec / 60); const ss = Math.round(sec % 60)
+    return `${m}:${ss.toString().padStart(2,'0')}/km`
+  }
+  return ''
+}
+
+function ExtraWorkoutsBlock({ date }: { date: string }) {
+  const extras = useLiveQuery(
+    () => db.sessions.where('date').equals(date).filter(s => !!s.isExtra).toArray(),
+    [date]
+  )
+  const [adding, setAdding] = useState(false)
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between px-1">
+        <span className="text-[12px] font-medium" style={{ color: 'var(--text-2)' }}>Entrenos extra</span>
+        <button
+          onClick={() => { setAdding(a => !a); vibrate(15) }}
+          className="text-[13px] font-medium"
+          style={{ color: adding ? 'var(--text-3)' : 'var(--accent)' }}
+        >
+          {adding ? 'Cancelar' : '+ Añadir'}
+        </button>
       </div>
-      <div className="grid grid-cols-2 gap-2">
-        <Field label="Distancia (km)" value={distance} onChange={setDistance} placeholder="0.0" />
-        <Field label="Duración (min)" value={duration} onChange={setDuration} placeholder="0" />
-        <Field label="FC media (bpm)" value={hr} onChange={setHr} placeholder="0" />
-        <Field label="RPE 1-10" value={rpe} onChange={setRpe} placeholder="0" />
+
+      <AnimatePresence>
+        {adding && (
+          <motion.div
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.15 }}
+          >
+            <AddExtraForm date={date} onDone={() => setAdding(false)} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {extras && extras.length > 0 && (
+        <div className="space-y-2">
+          {extras.map(s => <ExtraSessionCard key={s.id} session={s} />)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AddExtraForm({ date, onDone }: { date: string; onDone: () => void }) {
+  const [type, setType] = useState<ExtraType>('run')
+  const [title, setTitle] = useState('')
+  const [distance, setDistance] = useState('')
+  const [duration, setDuration] = useState('')
+  const [rpe, setRpe] = useState('')
+  const [pain, setPain] = useState('')
+  const [notes, setNotes] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const selected = EXTRA_TYPES.find(t => t.type === type)!
+
+  async function save() {
+    setSaving(true)
+    const dKm = distance ? Number(distance) : undefined
+    const dMin = duration ? Number(duration) : undefined
+    let avgPaceSecPerKm: number | undefined
+    let avgPaceSec100m: number | undefined
+    if (dKm && dMin) {
+      if (type === 'swim' || type === 'swim_pool') avgPaceSec100m = (dMin * 60) / (dKm * 10)
+      else if (type === 'run') avgPaceSecPerKm = (dMin * 60) / dKm
+    }
+    await db.sessions.add({
+      date,
+      type: type as WorkoutType,
+      isExtra: true,
+      extraTitle: title.trim() || undefined,
+      startedAt: Date.now(),
+      completedAt: Date.now(),
+      notes: notes.trim(),
+      distanceKm: dKm,
+      durationMin: dMin,
+      rpe: rpe ? Number(rpe) : undefined,
+      painProvoked: pain ? Number(pain) : undefined,
+      avgPaceSecPerKm,
+      avgPaceSec100m,
+    })
+    vibrate([40, 20, 80])
+    setSaving(false)
+    onDone()
+  }
+
+  const isEndurance = type === 'run' || type === 'bike' || type === 'bike_indoor' || type === 'swim' || type === 'swim_pool'
+
+  return (
+    <div className="card p-4 space-y-4">
+      {/* Type selector */}
+      <div>
+        <div className="text-[12px] mb-2" style={{ color: 'var(--text-3)' }}>Tipo</div>
+        <div className="grid grid-cols-3 gap-1.5">
+          {EXTRA_TYPES.map(t => (
+            <button
+              key={t.type}
+              onClick={() => { setType(t.type); vibrate(8) }}
+              className="rounded-lg py-2.5 px-2 flex items-center justify-center gap-1.5 transition-colors"
+              style={type === t.type
+                ? { background: 'var(--surface-3)', border: '1px solid var(--border-strong)' }
+                : { background: 'transparent', border: '1px solid var(--border)' }
+              }
+            >
+              <span className="w-1.5 h-1.5 rounded-full" style={{ background: t.color }} />
+              <span className="text-[12px] font-medium" style={{ color: type === t.type ? 'var(--text)' : 'var(--text-2)' }}>{t.label}</span>
+            </button>
+          ))}
+        </div>
       </div>
+
+      {/* Title (optional) */}
+      <label className="block">
+        <span className="text-[12px]" style={{ color: 'var(--text-3)' }}>Título (opcional)</span>
+        <input className="input mt-1.5" placeholder={`${selected.label}`} value={title} onChange={e => setTitle(e.target.value)} />
+      </label>
+
+      {/* Metrics */}
+      {isEndurance ? (
+        <div className="grid grid-cols-2 gap-2">
+          <label className="block">
+            <span className="text-[12px]" style={{ color: 'var(--text-3)' }}>Distancia (km)</span>
+            <input className="input mt-1.5 num" inputMode="decimal" placeholder="0.0" value={distance} onChange={e => setDistance(e.target.value)} />
+          </label>
+          <label className="block">
+            <span className="text-[12px]" style={{ color: 'var(--text-3)' }}>Duración (min)</span>
+            <input className="input mt-1.5 num" inputMode="decimal" placeholder="0" value={duration} onChange={e => setDuration(e.target.value)} />
+          </label>
+        </div>
+      ) : (
+        <label className="block">
+          <span className="text-[12px]" style={{ color: 'var(--text-3)' }}>Duración (min)</span>
+          <input className="input mt-1.5 num" inputMode="decimal" placeholder="0" value={duration} onChange={e => setDuration(e.target.value)} />
+        </label>
+      )}
+
       <div className="grid grid-cols-2 gap-2">
-        <a href="shealth://" className="btn btn-ghost text-sm">📱 Samsung Health</a>
-        <GpxImport date={date} onImported={d => { setDistance(String(d.distanceKm)); setDuration(String(d.durationMin)); if (d.avgHR) setHr(String(d.avgHR)) }} />
+        <label className="block">
+          <span className="text-[12px]" style={{ color: 'var(--text-3)' }}>RPE 1-10</span>
+          <input className="input mt-1.5 num" inputMode="decimal" placeholder="—" value={rpe} onChange={e => setRpe(e.target.value)} />
+        </label>
+        <label className="block">
+          <span className="text-[12px]" style={{ color: 'var(--text-3)' }}>Dolor lumbar 0-10</span>
+          <input className="input mt-1.5 num" inputMode="decimal" placeholder="—" value={pain} onChange={e => setPain(e.target.value)} />
+        </label>
+      </div>
+
+      <label className="block">
+        <span className="text-[12px]" style={{ color: 'var(--text-3)' }}>Notas</span>
+        <input className="input mt-1.5" placeholder="Sensaciones" value={notes} onChange={e => setNotes(e.target.value)} />
+      </label>
+
+      {/* Live pace preview */}
+      {isEndurance && distance && duration && (() => {
+        const dKm = Number(distance); const dMin = Number(duration)
+        if (!dKm || !dMin) return null
+        let pace = ''
+        if (type === 'swim' || type === 'swim_pool') { const s = (dMin*60)/(dKm*10); pace = `${Math.floor(s/60)}:${Math.round(s%60).toString().padStart(2,'0')}/100m` }
+        else if (type === 'bike' || type === 'bike_indoor') { pace = `${(dKm/(dMin/60)).toFixed(1)} km/h` }
+        else { const s = (dMin*60)/dKm; pace = `${Math.floor(s/60)}:${Math.round(s%60).toString().padStart(2,'0')}/km` }
+        return (
+          <div className="flex items-baseline justify-between pt-1">
+            <span className="text-[12px]" style={{ color: 'var(--text-3)' }}>Ritmo</span>
+            <span className="num font-semibold" style={{ color: 'var(--text)', fontSize: 24, letterSpacing: '-0.02em' }}>{pace}</span>
+          </div>
+        )
+      })()}
+
+      <button
+        onClick={save}
+        disabled={saving}
+        className="btn btn-primary w-full"
+        style={{ height: 44, opacity: saving ? 0.6 : 1 }}
+      >
+        {saving ? 'Guardando…' : `Guardar ${selected.label.toLowerCase()}`}
+      </button>
+    </div>
+  )
+}
+
+function ExtraSessionCard({ session: s }: { session: WorkoutSession }) {
+  const [confirmDel, setConfirmDel] = useState(false)
+  const meta = EXTRA_TYPES.find(t => t.type === s.type)
+  const pace = fmtExtraPace(s)
+  const label = s.extraTitle || `${meta?.label ?? s.type}`
+
+  async function del() {
+    await db.sessions.delete(s.id!)
+    vibrate(30)
+  }
+
+  return (
+    <div className="card p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-2.5 min-w-0">
+          <span className="w-1.5 h-1.5 rounded-full mt-2 shrink-0" style={{ background: meta?.color ?? 'var(--text-3)' }} />
+          <div className="min-w-0">
+            <div className="text-[15px] font-medium truncate" style={{ color: 'var(--text)' }}>{label}</div>
+            <div className="flex items-center gap-3 mt-1 text-[12px] flex-wrap" style={{ color: 'var(--text-2)' }}>
+              {s.distanceKm && <span><span className="num" style={{ color: 'var(--text)' }}>{s.distanceKm}</span> km</span>}
+              {s.durationMin && <span><span className="num" style={{ color: 'var(--text)' }}>{s.durationMin}</span> min</span>}
+              {pace && <span className="num" style={{ color: 'var(--text)' }}>{pace}</span>}
+              {s.rpe && <span>RPE <span className="num" style={{ color: 'var(--text)' }}>{s.rpe}</span></span>}
+              {s.painProvoked != null && <span style={{ color: painColor(s.painProvoked) }}>dolor <span className="num">{s.painProvoked}</span></span>}
+            </div>
+            {s.notes && <div className="text-[12px] mt-1 truncate" style={{ color: 'var(--text-3)' }}>{s.notes}</div>}
+          </div>
+        </div>
+        <div className="shrink-0">
+          {confirmDel ? (
+            <div className="flex items-center gap-2">
+              <button onClick={() => setConfirmDel(false)} className="text-[12px]" style={{ color: 'var(--text-3)' }}>No</button>
+              <button onClick={del} className="text-[12px] font-medium" style={{ color: 'var(--red)' }}>Borrar</button>
+            </div>
+          ) : (
+            <button onClick={() => setConfirmDel(true)} className="text-[18px] px-1" style={{ color: 'var(--text-3)' }}>×</button>
+          )}
+        </div>
       </div>
     </div>
   )
 }
 
-function GpxImport({ date, onImported }: { date: string; onImported: (d: { distanceKm: number; durationMin: number; avgHR?: number }) => void }) {
-  return (
-    <label className="btn btn-ghost text-sm cursor-pointer">
-      ↑ Importar GPX
-      <input type="file" accept=".gpx,application/gpx+xml,text/xml" className="hidden" onChange={async e => {
-        const file = e.target.files?.[0]
-        if (!file) return
-        const text = await file.text()
-        try {
-          const result = parseGpx(text)
-          onImported(result)
-          // Also persist directly
-          const s = await db.sessions.where('date').equals(date).first()
-          if (s) await db.sessions.update(s.id!, { distanceKm: result.distanceKm, durationMin: result.durationMin, avgHR: result.avgHR })
-          alert(`Importado: ${result.distanceKm}km · ${result.durationMin}min${result.avgHR ? ` · ${result.avgHR}bpm` : ''}`)
-        } catch (err) {
-          alert('Error parseando GPX')
-        }
-        e.target.value = ''
-      }} />
-    </label>
-  )
-}
-
-function Field({ label, value, onChange, placeholder }: { label: string; value: string; onChange: (v: string) => void; placeholder?: string }) {
-  return (
-    <label className="block">
-      <span className="text-[10px] uppercase tracking-widest text-bone2">{label}</span>
-      <input className="input mt-1 mono" inputMode="decimal" value={value} placeholder={placeholder} onChange={e => onChange(e.target.value)} />
-    </label>
-  )
-}
-
 function NotesField({ date }: { date: string }) {
-  const session = useLiveQuery(() => db.sessions.where('date').equals(date).first(), [date])
+  const session = useLiveQuery(() => db.sessions.where('date').equals(date).filter(s => !s.isExtra).first(), [date])
   const [notes, setNotes] = useState('')
   useEffect(() => { if (session) setNotes(session.notes ?? '') }, [session?.id])
   const status = useAutosave(notes, async (v) => {
-    let s = await db.sessions.where('date').equals(date).first()
+    let s = await db.sessions.where('date').equals(date).filter(s => !s.isExtra).first()
     if (!s) {
-      const id = await db.sessions.add({ date, type: 'rest', startedAt: Date.now(), notes: v })
+      const id = await db.sessions.add({ date, type: 'rest', startedAt: Date.now(), notes: v, isExtra: false })
       s = await db.sessions.get(id)
     } else {
       await db.sessions.update(s.id!, { notes: v })
     }
   })
   return (
-    <div className="card p-3">
-      <div className="flex items-center justify-between mb-1">
-        <span className="text-[10px] uppercase tracking-widest text-bone2">Notas del día</span>
+    <div className="card p-4">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-[12px] font-medium" style={{ color: 'var(--text-2)' }}>Notas del día</span>
         <SaveIndicator status={status} />
       </div>
       <textarea rows={3} className="input resize-none" placeholder="Sensaciones, dolor, contexto…"

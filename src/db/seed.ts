@@ -1,4 +1,5 @@
 import { db, type ExerciseTemplate, type PlanDay, type Phase, type WorkoutType } from './schema'
+import { REHAB_LIBRARY } from '../lib/rehab'
 
 // Plan: 2026-05-04 (Mon, week 1) → 2026-09-27 (Sun, race day) = 21 weeks
 const START = '2026-05-04'
@@ -13,8 +14,9 @@ function addDays(iso: string, days: number): string {
   return dt.toISOString().slice(0, 10)
 }
 
-export function daysUntilRace(today = new Date()): number {
-  const [ry, rm, rd] = RACE.split('-').map(Number)
+export function daysUntilRace(raceDateIso?: string, today = new Date()): number {
+  const dateStr = raceDateIso ?? RACE
+  const [ry, rm, rd] = dateStr.split('-').map(Number)
   const race = Date.UTC(ry, rm - 1, rd)
   const t = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())
   return Math.round((race - t) / 86400000)
@@ -175,36 +177,56 @@ export function buildPlanDays(): PlanDay[] {
   return days
 }
 
+// Rutina real de Alex (split P/P/L/T + Full Body). NOTA: crunch/sit-up retirados
+// por flexión lumbar bajo carga (contraindicado, ver lesión).
 const PUSH_TEMPLATES: Omit<ExerciseTemplate, 'id'>[] = [
-  { type: 'push', order: 1, name: 'Press Banca', series: 5, reps: '7', rir: '3', pesoSugerido: 120, pesoUnidad: 'kg', muscleGroups: ['pecho','triceps','hombro'], active: true },
-  { type: 'push', order: 2, name: 'Extensión Cuádriceps', series: 5, reps: '10-12', pesoUnidad: 'kg', muscleGroups: ['cuadriceps'], active: true },
-  { type: 'push', order: 3, name: 'Cruce Poleas Desc. Tumbado', series: 4, reps: '10', pesoSugerido: 39, pesoUnidad: 'kg', muscleGroups: ['pecho'], active: true },
-  { type: 'push', order: 4, name: 'Fondos Tríceps', series: 3, reps: '15', rir: '0', pesoUnidad: 'bw', notas: 'Lastrar día 5', muscleGroups: ['triceps','pecho'], active: true },
-  { type: 'push', order: 5, name: 'Gemelo Prensa', series: 4, reps: '12', pesoUnidad: 'kg', muscleGroups: ['gemelo'], active: true },
-  { type: 'push', order: 6, name: 'Elevaciones Laterales Mancuerna', series: 3, reps: '15', pesoSugerido: 10, pesoUnidad: 'kg', muscleGroups: ['hombro'], active: true },
+  { type: 'push', order: 1, name: 'Press banca', series: 4, reps: '5-7', muscleGroups: ['pecho','triceps','hombro'], pesoUnidad: 'kg', active: true },
+  { type: 'push', order: 2, name: 'Press inclinado mancuerna', series: 3, reps: '8-10', muscleGroups: ['pecho','hombro','triceps'], pesoUnidad: 'kg', active: true },
+  { type: 'push', order: 3, name: 'Fondos paralelas', series: 4, reps: '6-8', muscleGroups: ['pecho','triceps','hombro'], pesoUnidad: 'bw', active: true },
+  { type: 'push', order: 4, name: 'Cruce polea alta', series: 3, reps: '10-12', muscleGroups: ['pecho'], pesoUnidad: 'kg', active: true },
+  { type: 'push', order: 5, name: 'Tríceps trasnuca', series: 3, reps: '8-10', muscleGroups: ['triceps'], pesoUnidad: 'kg', active: true },
+  { type: 'push', order: 6, name: 'Elevaciones laterales', series: 4, reps: '12-15', muscleGroups: ['hombro'], pesoUnidad: 'kg', active: true },
 ]
 
 const PULL_TEMPLATES: Omit<ExerciseTemplate, 'id'>[] = [
-  { type: 'pull', order: 1, name: 'Remo Máquina', series: 4, reps: '7-8', pesoSugerido: 93, pesoUnidad: 'kg', muscleGroups: ['espalda','biceps'], active: true },
-  { type: 'pull', order: 2, name: 'Curl Bíceps Bilateral Polea', series: 3, reps: '8-11', pesoSugerido: 52, pesoUnidad: 'kg', muscleGroups: ['biceps'], active: true },
-  { type: 'pull', order: 3, name: 'Dominadas / Jalón Pecho', series: 3, reps: '10', rir: '0', pesoUnidad: 'bw', muscleGroups: ['espalda','biceps'], active: true },
-  { type: 'pull', order: 4, name: 'Romanian Deadlift', series: 4, reps: '8', pesoSugerido: 52, pesoUnidad: 'kg', notas: 'Reemplaza Buenos Días — mejor transferencia carrera', muscleGroups: ['isquios','gluteo','espalda'], active: true },
-  { type: 'pull', order: 5, name: 'Abducción Glúteo', series: 4, reps: '12', pesoUnidad: 'kg', muscleGroups: ['gluteo'], active: true },
-  { type: 'pull', order: 6, name: 'Curl Bayesian Polea Unilateral', series: 4, reps: '10', pesoSugerido: 20, pesoUnidad: 'kg', muscleGroups: ['biceps'], active: true },
+  { type: 'pull', order: 1, name: 'Dominada lastrada', series: 4, reps: '5-7', muscleGroups: ['espalda','biceps'], pesoUnidad: 'bw', active: true },
+  { type: 'pull', order: 2, name: 'Remo máquina', series: 4, reps: '6-8', muscleGroups: ['espalda','biceps'], pesoUnidad: 'kg', active: true },
+  { type: 'pull', order: 3, name: 'Pull over', series: 3, reps: '8-10', muscleGroups: ['espalda'], pesoUnidad: 'kg', active: true },
+  { type: 'pull', order: 4, name: 'Curl bíceps martillo', series: 3, reps: '10-12', muscleGroups: ['biceps'], pesoUnidad: 'kg', active: true },
+  { type: 'pull', order: 5, name: 'Curl bíceps polea', series: 3, reps: '8-10', muscleGroups: ['biceps'], pesoUnidad: 'kg', active: true },
+  { type: 'pull', order: 6, name: 'Face pulls cuerda', series: 3, reps: '12-15', muscleGroups: ['espalda','hombro'], pesoUnidad: 'kg', active: true },
+]
+
+const LEGS_TEMPLATES: Omit<ExerciseTemplate, 'id'>[] = [
+  { type: 'legs', order: 1, name: 'Sentadilla búlgara', series: 3, reps: '5-7', muscleGroups: ['cuadriceps','gluteo'], pesoUnidad: 'kg', active: true },
+  { type: 'legs', order: 2, name: 'Peso muerto rumano', series: 4, reps: '6-8', notas: 'Lumbar neutra, bisagra de cadera', muscleGroups: ['isquios','gluteo'], pesoUnidad: 'kg', active: true },
+  { type: 'legs', order: 3, name: 'Extensión cuádriceps', series: 3, reps: '10', muscleGroups: ['cuadriceps'], pesoUnidad: 'kg', active: true },
+  { type: 'legs', order: 4, name: 'Abductores', series: 4, reps: '8/lado', muscleGroups: ['gluteo'], pesoUnidad: 'kg', active: true },
+  { type: 'legs', order: 5, name: 'Elevación gemelo de pie', series: 4, reps: '12-15', muscleGroups: ['gemelo'], pesoUnidad: 'kg', active: true },
+  { type: 'legs', order: 6, name: 'Plancha abs', series: 3, reps: '40"', muscleGroups: ['core'], pesoUnidad: 'bw', active: true },
+]
+
+const TORSO_TEMPLATES: Omit<ExerciseTemplate, 'id'>[] = [
+  { type: 'torso', order: 1, name: 'Press inclinado mancuerna', series: 4, reps: '4-6', muscleGroups: ['pecho','hombro','triceps'], pesoUnidad: 'kg', active: true },
+  { type: 'torso', order: 2, name: 'Remo bajo polea', series: 3, reps: '6-8', muscleGroups: ['espalda','biceps'], pesoUnidad: 'kg', active: true },
+  { type: 'torso', order: 3, name: 'Cruce poleas tumbado', series: 3, reps: '6-8', muscleGroups: ['pecho'], pesoUnidad: 'kg', active: true },
+  { type: 'torso', order: 4, name: 'Jalón al pecho', series: 3, reps: '6-8', muscleGroups: ['espalda','biceps'], pesoUnidad: 'kg', active: true },
+  { type: 'torso', order: 5, name: 'Curl bíceps', series: 3, reps: '10', muscleGroups: ['biceps'], pesoUnidad: 'kg', active: true },
+  { type: 'torso', order: 6, name: 'Extensión tríceps', series: 3, reps: '8-10', muscleGroups: ['triceps'], pesoUnidad: 'kg', active: true },
 ]
 
 const FULLBODY_TEMPLATES: Omit<ExerciseTemplate, 'id'>[] = [
-  { type: 'fullbody', order: 1, name: 'Sentadilla Búlgara', series: 3, reps: '8/lado', notas: 'Fuerza unilateral bici/carrera', pesoUnidad: 'kg', muscleGroups: ['cuadriceps','gluteo'], active: true },
-  { type: 'fullbody', order: 2, name: 'Remo Mancuerna Unilateral', series: 3, reps: '10/lado', notas: 'Espalda asimétrica = nado', pesoUnidad: 'kg', muscleGroups: ['espalda'], active: true },
-  { type: 'fullbody', order: 3, name: 'Hip Thrust', series: 3, reps: '10', notas: 'Potencia glútea bici', pesoUnidad: 'kg', muscleGroups: ['gluteo','isquios'], active: true },
-  { type: 'fullbody', order: 4, name: 'Press Militar', series: 3, reps: '8', notas: 'Hombro estable nado', pesoUnidad: 'kg', muscleGroups: ['hombro','triceps'], active: true },
-  { type: 'fullbody', order: 5, name: 'Zancada Caminando con Peso', series: 3, reps: '12/lado', notas: 'Transferencia carrera', pesoUnidad: 'kg', muscleGroups: ['cuadriceps','gluteo'], active: true },
-  { type: 'fullbody', order: 6, name: 'Pallof Press', series: 3, reps: '10/lado', notas: 'Core estabilizador triatlón', pesoUnidad: 'kg', muscleGroups: ['core'], active: true },
-  { type: 'fullbody', order: 7, name: 'Plancha Brazos en Movimiento', series: 3, reps: '30"', notas: 'Estabilidad hombro nado', pesoUnidad: 'bw', muscleGroups: ['core','hombro'], active: true },
+  { type: 'fullbody', order: 1, name: 'Sentadilla búlgara', series: 3, reps: '8/lado', muscleGroups: ['cuadriceps','gluteo'], pesoUnidad: 'kg', active: true },
+  { type: 'fullbody', order: 2, name: 'Remo mancuerna unilateral', series: 3, reps: '10/lado', muscleGroups: ['espalda'], pesoUnidad: 'kg', active: true },
+  { type: 'fullbody', order: 3, name: 'Hip thrust', series: 3, reps: '10', muscleGroups: ['gluteo','isquios'], pesoUnidad: 'kg', active: true },
+  { type: 'fullbody', order: 4, name: 'Press militar', series: 3, reps: '8', muscleGroups: ['hombro','triceps'], pesoUnidad: 'kg', active: true },
+  { type: 'fullbody', order: 5, name: 'Zancada caminando con peso', series: 3, reps: '12/lado', muscleGroups: ['cuadriceps','gluteo'], pesoUnidad: 'kg', active: true },
+  { type: 'fullbody', order: 6, name: 'Pallof press', series: 3, reps: '10/lado', muscleGroups: ['core'], pesoUnidad: 'kg', active: true },
+  { type: 'fullbody', order: 7, name: 'Plancha brazos en movimiento', series: 3, reps: '30"', muscleGroups: ['core','hombro'], pesoUnidad: 'bw', active: true },
 ]
 
 export async function seedIfEmpty() {
-  await db.transaction('rw', db.profile, db.exerciseTemplates, db.planDays, async () => {
+  await db.transaction('rw', [db.profile, db.exerciseTemplates, db.planDays, db.rehabExercises, db.schedule], async () => {
     const profile = await db.profile.get('me')
     if (!profile) {
       await db.profile.put({
@@ -212,8 +234,8 @@ export async function seedIfEmpty() {
         nombre: 'Alex López',
         pesoInicial: 91,
         altura: 180,
-        edad: 20,
-        objetivo: 'Triatlón Sprint Artiem Half Menorca · Híbrido fuerza + resistencia',
+        edad: 21,
+        objetivo: 'Entrenamiento personal + readaptación lumbar',
         inicioPlan: START,
         raceDate: RACE,
         caloriasObj: 2975,
@@ -224,11 +246,21 @@ export async function seedIfEmpty() {
     }
     const tplCount = await db.exerciseTemplates.count()
     if (tplCount === 0) {
-      await db.exerciseTemplates.bulkAdd([...PUSH_TEMPLATES, ...PULL_TEMPLATES, ...FULLBODY_TEMPLATES])
+      await db.exerciseTemplates.bulkAdd([...PUSH_TEMPLATES, ...PULL_TEMPLATES, ...LEGS_TEMPLATES, ...TORSO_TEMPLATES, ...FULLBODY_TEMPLATES])
     }
-    const planCount = await db.planDays.count()
-    if (planCount === 0) {
-      await db.planDays.bulkAdd(buildPlanDays())
+    // Plan de 21 semanas de triatlón retirado (Fase A · entreno personal).
+    // buildPlanDays() se conserva por compatibilidad pero ya NO se siembra.
+    const rehabCount = await db.rehabExercises.count()
+    if (rehabCount === 0) {
+      await db.rehabExercises.bulkAdd(REHAB_LIBRARY)
+    }
+    const schedCount = await db.schedule.count()
+    if (schedCount === 0) {
+      // Lun Push · Mar Pull · Mié descanso · Jue Legs · Vie Torso · Sáb/Dom descanso
+      await db.schedule.bulkAdd([
+        { dow: 0, type: 'push' }, { dow: 1, type: 'pull' }, { dow: 2, type: 'rest' },
+        { dow: 3, type: 'legs' }, { dow: 4, type: 'torso' }, { dow: 5, type: 'rest' }, { dow: 6, type: 'rest' },
+      ])
     }
   })
 }
